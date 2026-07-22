@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+*.app
+
+# Compiled binary (regenerate with build-app.sh)
+vibe-island-new
+vibe-island
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Keep: source, scripts, fonts, logos, docs
