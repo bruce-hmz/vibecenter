@@ -33,6 +33,7 @@ DEFAULT_POLL_INTERVAL = 120.0
 DEFAULT_ZCODE_CONFIG = "~/.zcode/v2/config.json"
 DEFAULT_LOCK_PATH = "~/.vibe-island/run/usage-daemon.lock"
 DEFAULT_IPC_TOKEN_FILE = "~/.vibe-island/run/ipc-token"
+DEFAULT_LOG_FILE = "~/.vibe-island/run/usage-daemon.log"
 QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
 SUBSCRIPTION_URL = "https://open.bigmodel.cn/api/biz/subscription/list"
 CODEX_SESSIONS_DIR = os.environ.get(
@@ -50,8 +51,17 @@ UNIT_MONTHLY = 5
 
 
 def log(msg):
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    """Log to stdout and a persistent file so launched-daemon output is never lost."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    try:
+        log_file = expand_path(os.environ.get("VIBE_ISLAND_USAGE_LOG", DEFAULT_LOG_FILE))
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
 
 
 def expand_path(path_value):
@@ -609,11 +619,13 @@ def poll_all_providers():
         else:
             snapshot = fetch_openai_billing_usage(prov["base_url"], prov["key"])
         if snapshot:
-            snapshot["provider"] = prov["name"]
+            snapshot["provider"] = "智谱 GLM" if hint == "bigmodel" else prov["name"]
             if push_usage(snapshot):
                 pct = snapshot.get("monthly") or snapshot.get("seven_day") or 0
-                log(f"pushed {prov['name']}: {pct}% plan={snapshot.get('plan', '?')}")
+                log(f"pushed {snapshot.get('provider', prov['name'])}: {pct}% plan={snapshot.get('plan', '?')}")
                 polled_any = True
+            else:
+                log(f"push failed for {prov['name']} (notch app unreachable on {HOST}:{PORT})")
         else:
             log(f"no usage data for {prov['name']} ({hint})")
     return polled_any

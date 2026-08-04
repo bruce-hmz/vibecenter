@@ -3,9 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Vibe Island</string>
+    <string>Vibe Center</string>
     <key>CFBundleDisplayName</key>
-    <string>Vibe Island</string>
+    <string>Vibe Center</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>app.self-made.vibe-island</string>
     <key>CFBundleVersion</key>

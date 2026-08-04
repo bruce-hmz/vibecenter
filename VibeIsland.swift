@@ -73,13 +73,29 @@ enum ProviderLogo {
     static func image(for provider: String, size: CGFloat) -> Image? {
         // Normalize "Z.ai" / "Codex" / "Claude" → filename.
         let name: String
-        switch provider.lowercased() {
-        case "z.ai", "zai", "zhipu", "bigmodel": name = "zai"
+        let lower = provider.lowercased()
+        switch lower {
+        case "z.ai", "zai", "zhipu", "bigmodel", "智谱", "智谱 glm", "glm": name = "zai"
         case "claude", "anthropic":              name = "claude"
         case "codex", "openai":                  name = "codex"
         case "gemini":                           name = "gemini"
         case "kimi":                             name = "kimi"
-        default:                                 name = provider.lowercased()
+        default:
+            // Fuzzy fallback so full names like "BigModel - Coding Plan"
+            // still resolve to the right provider logo.
+            if lower.contains("bigmodel") || lower.contains("zai") || lower.contains("智谱") || lower.contains("glm") {
+                name = "zai"
+            } else if lower.contains("claude") || lower.contains("anthropic") {
+                name = "claude"
+            } else if lower.contains("codex") || lower.contains("openai") {
+                name = "codex"
+            } else if lower.contains("gemini") {
+                name = "gemini"
+            } else if lower.contains("kimi") {
+                name = "kimi"
+            } else {
+                name = lower
+            }
         }
         let candidates = [
             // .app bundle
@@ -2615,7 +2631,7 @@ struct OverviewView: View {
             HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 7) {
-                        Text("VIBE ISLAND")
+                        Text("VIBE CENTER")
                             .font(NotchFont.mono(9))
                             .foregroundColor(Theme.textMain)
                             .tracking(0.8)
@@ -3652,7 +3668,7 @@ struct ControllerView: View {
     @ObservedObject var viewModel: NotchViewModel
     var body: some View {
         VStack(spacing: 20) {
-            Text("Vibe Island Controls").font(.system(size: 16, weight: .semibold))
+            Text("Vibe Center Controls").font(.system(size: 16, weight: .semibold))
             HStack(spacing: 12) {
                 CtrlBtn(title: "Dismiss", icon: "minus", color: Theme.green) { viewModel.denyCurrentRequest() }
                 CtrlBtn(title: "Overview", icon: "square.grid.2x2", color: .white) { viewModel.isPinned = true }
@@ -3679,7 +3695,7 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Vibe Island").font(.system(size: 16, weight: .semibold))
+                Text("Vibe Center").font(.system(size: 16, weight: .semibold))
 
                 GroupBox("运行状态") {
                     VStack(alignment: .leading, spacing: 10) {
@@ -4075,7 +4091,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             let symbol = NSImage(systemSymbolName: "waveform",
-                                 accessibilityDescription: "Vibe Island")
+                                 accessibilityDescription: "Vibe Center")
             button.image = symbol
             button.image?.isTemplate = true
         }
@@ -4100,7 +4116,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         usageItem.target = self
         usageItem.state = viewModel.autoStartUsage ? .on : .off
         menu.addItem(.separator())
-        menu.addItem(withTitle: "退出 Vibe Island", action: #selector(quitFromMenu),
+        menu.addItem(withTitle: "退出 Vibe Center", action: #selector(quitFromMenu),
                      keyEquivalent: "q").target = self
     }
 
@@ -4128,7 +4144,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 680),
                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        win.title = "Vibe Island"
+        win.title = "Vibe Center"
         win.titlebarAppearsTransparent = false
         win.isReleasedWhenClosed = false
         win.contentView = NSHostingView(rootView:

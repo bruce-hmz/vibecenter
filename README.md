@@ -1,4 +1,4 @@
-# Vibe Island (Self-Made)
+# Vibe Center (Self-Made)
 
 A self-made macOS Dynamic Island / notch panel for AI coding agents —
 modeled after [vibeisland.app](https://vibeisland.app), built from scratch
@@ -34,7 +34,7 @@ quotas, and approval prompts for write operations.
 ### Option A: Pre-built .app
 ```bash
 ./build-app.sh --install
-open -a VibeIsland
+open -a 'Vibe Center'
 ```
 
 After upgrading from an older build, open **Settings → Claude Code Hook** and

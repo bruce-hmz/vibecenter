@@ -1,5 +1,5 @@
 #!/bin/zsh
-# build-app.sh — compile + assemble a .app bundle for Vibe Island.
+# build-app.sh — compile + assemble a .app bundle for Vibe Center.
 #
 # Usage:
 #   ./build-app.sh           # build to ./build/VibeIsland.app
@@ -57,6 +57,11 @@ cp "$SRC_DIR/DepartureMono-Regular.otf" "$APP_BUNDLE/Contents/Resources/Fonts/"
 
 # Provider logos
 cp "$SRC_DIR/logos/"*.png "$APP_BUNDLE/Contents/Resources/logos/" 2>/dev/null
+
+# App icon (.icns referenced by CFBundleIconFile in Info.plist)
+if [ -f "$SRC_DIR/AppIcon.icns" ]; then
+  cp "$SRC_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+fi
 
 # scan-agents.sh（运行时需要）
 cp "$SRC_DIR/scan-agents.sh" "$APP_BUNDLE/Contents/Resources/scan-agents.sh"
