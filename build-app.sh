@@ -11,18 +11,30 @@ APP_NAME="VibeIsland"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SRC_DIR/build"
 APP_BUNDLE="$BUILD_DIR/${APP_NAME}.app"
+COMPILE_BINARY="$BUILD_DIR/vibe-island-new"
+COMPILE_LOG="$BUILD_DIR/swiftc.log"
+MODULE_CACHE_DIR="$BUILD_DIR/module-cache"
 
 red()   { printf "\033[31m%s\033[0m\n" "$*"; }
 green() { printf "\033[32m%s\033[0m\n" "$*"; }
 bold()  { printf "\033[1m%s\033[0m\n" "$*"; }
 
 echo "=== 1. 编译 Swift ==="
-swiftc -O -parse-as-library \
-  -framework SwiftUI -framework AppKit -framework Network -framework Combine \
-  -framework CoreText -framework CoreFoundation \
-  "$SRC_DIR/VibeIsland.swift" \
-  -o "$SRC_DIR/vibe-island-new" 2>&1 | grep -E "error:" || true
-[ -x "$SRC_DIR/vibe-island-new" ] || { red "✗ 编译失败"; exit 1; }
+mkdir -p "$BUILD_DIR"
+if ! swiftc -O -parse-as-library \
+    -module-cache-path "$MODULE_CACHE_DIR" \
+    -framework SwiftUI -framework AppKit -framework Network -framework Combine \
+    -framework CoreText -framework CoreFoundation -framework UserNotifications \
+    -framework CryptoKit \
+    "$SRC_DIR/VibeIsland.swift" \
+    -o "$COMPILE_BINARY" >"$COMPILE_LOG" 2>&1; then
+  cat "$COMPILE_LOG"
+  red "✗ 编译失败"
+  exit 1
+fi
+[ -x "$COMPILE_BINARY" ] || { red "✗ 编译器未生成可执行文件"; exit 1; }
+[ ! -s "$COMPILE_LOG" ] || cat "$COMPILE_LOG"
+mv "$COMPILE_BINARY" "$SRC_DIR/vibe-island-new"
 green "✓ 编译成功"
 
 echo ""
@@ -31,6 +43,7 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources/logos"
 mkdir -p "$APP_BUNDLE/Contents/Resources/Fonts"
+mkdir -p "$APP_BUNDLE/Contents/Resources/bin"
 
 # 二进制
 cp "$SRC_DIR/vibe-island-new" "$APP_BUNDLE/Contents/MacOS/vibe-island"
@@ -48,6 +61,12 @@ cp "$SRC_DIR/logos/"*.png "$APP_BUNDLE/Contents/Resources/logos/" 2>/dev/null
 # scan-agents.sh（运行时需要）
 cp "$SRC_DIR/scan-agents.sh" "$APP_BUNDLE/Contents/Resources/scan-agents.sh"
 chmod +x "$APP_BUNDLE/Contents/Resources/scan-agents.sh"
+
+# bundled helper scripts（供 app 托管 / 设置页调用）
+for helper_script in relay.py usage-daemon.py install-hook.sh; do
+  cp "$SRC_DIR/$helper_script" "$APP_BUNDLE/Contents/Resources/bin/$helper_script"
+  chmod +x "$APP_BUNDLE/Contents/Resources/bin/$helper_script"
+done
 
 green "✓ bundle 组装完成: $APP_BUNDLE"
 

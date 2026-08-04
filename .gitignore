@@ -13,3 +13,4 @@ vibe-island
 .DS_Store
 
 # Keep: source, scripts, fonts, logos, docs
+.omx/
