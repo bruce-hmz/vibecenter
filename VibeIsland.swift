@@ -2782,10 +2782,11 @@ struct IslandIconButton: View {
     }
 }
 
-// A quiet usage strip. Multiple providers change only when the user asks;
-// the overview itself never starts a distracting carousel.
+// A usage strip that auto-rotates through every provider (Codex, 智谱 GLM,
+// …) every few seconds so all quotas are visible without clicking.
 struct UsageRotator: View {
     @ObservedObject var vm: NotchViewModel
+    private let rotationInterval: TimeInterval = 5.0
 
     var body: some View {
         let providers = vm.providers
@@ -2821,9 +2822,15 @@ struct UsageRotator: View {
                                 .font(NotchFont.mono(9))
                                 .foregroundColor(Theme.textMuted)
                             if providers.count > 1 {
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 7, weight: .bold))
-                                    .foregroundColor(Theme.textMuted)
+                                HStack(spacing: 2) {
+                                    ForEach(0..<providers.count, id: \.self) { i in
+                                        Circle()
+                                            .fill(i == vm.currentProviderIndex
+                                                  ? Theme.textMuted
+                                                  : Theme.textMuted.opacity(0.3))
+                                            .frame(width: 3, height: 3)
+                                    }
+                                }
                             }
                         }
                     }
@@ -2856,6 +2863,11 @@ struct UsageRotator: View {
                 }
                 .id(vm.currentProviderIndex)
                 .animation(.easeInOut(duration: 0.25), value: vm.currentProviderIndex)
+                .onReceive(Timer.publish(every: rotationInterval, on: .main, in: .common).autoconnect()) { _ in
+                    if vm.providers.count > 1 {
+                        advance(count: vm.providers.count)
+                    }
+                }
             }
         }
     }
