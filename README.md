@@ -12,7 +12,7 @@ quotas, and approval prompts for write operations.
 
 - **Notch overlay** — top-center, dropdown-style shape (square top, rounded bottom)
 - **Hover or click to expand** — preview on hover, click to pin the session center
-- **Multi-agent session list** — scans running claude/zcode/codex processes
+- **Multi-agent session list** — scans running agent sessions (see below)
 - **Real-time activity** — FileWatcher on rollout/transcript files (zero-delay)
 - **Compact mode** — provider, current activity, pulse animation, and `+N` overflow
 - **Usage monitoring** — Z.ai 5h/7d/monthly quotas with reset times + provider logo
@@ -28,6 +28,24 @@ quotas, and approval prompts for write operations.
 - **Return to work context** — PID app activation, terminal/provider fallback, then exact workspace fallback
 - **DepartureMono font** — same font as the real app
 - **Pulse bars** — animated equalizer when agent is actively working
+
+### Supported agents
+
+| Agent | Source id | Where sessions are read from |
+|-------|-----------|------------------------------|
+| Claude Code | `claude` | `~/.claude/projects/<encoded-cwd>/*.jsonl` + running process |
+| ZCode | `zcode` | `~/.zcode/cli/rollout/model-io-*.jsonl` (title falls back to the rollout's first user prompt) |
+| OpenAI Codex | `codex` | `~/.codex/sessions/**/rollout-*.jsonl` + running process |
+| Gemini (Antigravity) | `gemini` | `~/.gemini/antigravity-cli/log/cli-*.log` + summaries DB |
+| Gemini CLI (native) | `gemini` | `~/.gemini/tmp/<slug>/chats/session-*.jsonl` + `.project_root` |
+| Qwen Code | `qwen` | `~/.qwen/tmp/<slug>/chats/session-*.jsonl` (same layout as Gemini CLI) |
+| Kimi CLI | `kimi` | `~/.kimi/sessions/**/wire.jsonl` / `~/.kimi-code/sessions/**/wire.jsonl` |
+| OpenCode | `opencode` | `~/.local/share/opencode/storage/{session,message,message_part}/` |
+| DeepSeek | `deepseek` | `~/.deepseek/sessions/*.json` |
+
+Every source can be toggled with `VIBE_ISLAND_ONLY_SOURCES` and its scan
+paths/window overridden with `VIBE_ISLAND_<SOURCE>_*` env vars (see
+`scan-agents.sh`); tests in `tests/test_scan_agents.py` rely on these hooks.
 
 ## Quick Start
 

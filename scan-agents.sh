@@ -307,7 +307,13 @@ if source_enabled "claude"; then
     encoded=$(encode_cwd "$cwd")
     transcript=""
     if [ -d "$claude_projects/$encoded" ]; then
-      transcript=$(ls -t "$claude_projects/$encoded"/*.jsonl 2>/dev/null | head -1)
+      # (N) null-glob so an empty project dir doesn't abort with zsh's
+      # "no matches found" (and an unguarded `ls -t` with no args would
+      # list the cwd, producing a bogus transcript path).
+      claude_files=("$claude_projects/$encoded"/*.jsonl(N))
+      if [ ${#claude_files} -gt 0 ]; then
+        transcript=$(ls -t -- "${claude_files[@]}" 2>/dev/null | head -1)
+      fi
     fi
     [ -z "$transcript" ] && continue
     # One Claude Code session can run as several processes (main + workers)
@@ -339,16 +345,19 @@ fi
 zcode_artifacts="$HOME/.zcode/cli/artifacts"
 
 # Extract title (first turn_started input) + preview (latest activity)
-# + timestamp. Title comes from transcript; preview comes from the
-# ROLLOUT file (which is written in real-time while the agent is working,
-# so it reflects the current activity, not a stale transcript).
+# + timestamp. Title prefers the transcript; when the agents/<sess> dir is
+# missing (newer ZCode versions don't always create it for main sessions),
+# it falls back to the first user message embedded in the ROLLOUT file's
+# request.messages. Preview always comes from the rollout (real-time).
 zcode_latest_activity() {
   local sess_dir="$1"
   local sess_id="$2"
   [ -z "$sess_id" ] && sess_id=$(basename "$sess_dir" 2>/dev/null)
+  local rollout="$3"
+  [ -z "$rollout" ] && rollout="$HOME/.zcode/cli/rollout/model-io-$sess_id.jsonl"
 
   # Title from transcript (first user message = session name).
-  local title="ZCode"
+  local title=""
   local agents_dir="$HOME/.zcode/cli/agents/$sess_id"
   local transcript=""
   if [ -d "$agents_dir" ]; then
@@ -369,17 +378,27 @@ try:
                     first = inp.strip().split("\n")[0][:60]
                     break
 except: pass
-print(first or "ZCode")
+print(first)
 PY
 )
   fi
 
-  # Preview + timestamp from rollout (real-time, latest activity).
-  local rollout="$HOME/.zcode/cli/rollout/model-io-$sess_id.jsonl"
-  local preview="" last_ts=""
+  # Title fallback + preview + timestamp from rollout (real-time).
+  local preview="" last_ts="" rollout_title=""
   if [ -f "$rollout" ]; then
     result=$(python3 - "$rollout" <<'PY' 2>/dev/null
 import json, sys
+
+def message_text(msg):
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") for p in content
+                       if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+rollout_title = ""
 last_content = ""
 last_ts = ""
 try:
@@ -390,8 +409,20 @@ try:
             # timestamp from completedAt
             ts = d.get("completedAt") or d.get("startedAt") or ""
             if ts: last_ts = ts
-            resp = d.get("response", {})
+            # First user prompt across all requests = session title. The
+            # very first record is ZCode's title-generation request, whose
+            # user message is exactly the raw first prompt.
+            req = d.get("request", {})
+            for msg in (req.get("messages") or []):
+                if msg.get("role") != "user":
+                    continue
+                text = message_text(msg).strip()
+                if not text or text.startswith(("<", "[")):
+                    continue
+                if not rollout_title:
+                    rollout_title = text.split("\n")[0][:60]
             # Prefer text (assistant reply), then toolCalls (what it's doing).
+            resp = d.get("response", {})
             text = resp.get("text", "")
             if text:
                 last_content = text.strip().split("\n")[0][:70]
@@ -404,14 +435,16 @@ try:
                         last_content = f"tool: {name}"
 except: pass
 import sys as s2
-s2.stdout.write(last_content.replace("\t"," ") + "\t" + last_ts)
+s2.stdout.write(rollout_title.replace("\t"," ") + "\t" + last_content.replace("\t"," ") + "\t" + last_ts)
 PY
 )
-    preview=$(echo "$result" | cut -f1)
-    last_ts=$(echo "$result" | cut -f2)
+    rollout_title=$(echo "$result" | cut -f1)
+    preview=$(echo "$result" | cut -f2)
+    last_ts=$(echo "$result" | cut -f3)
   fi
 
-  print -r -- "${title}	${preview}	${last_ts}"
+  [ -z "$title" ] && title="$rollout_title"
+  print -r -- "${title:-ZCode}	${preview}	${last_ts}"
 }
 
 # Only emit zcode sessions if ZCode.app is actually running.
@@ -436,11 +469,11 @@ if source_enabled "zcode" && [ "$zcode_app_running" = "true" ]; then
     [[ "$rf" == *subagent* ]] && continue
     sess_id=$(basename "$rf" .jsonl | sed 's/model-io-//')
     [ -z "$sess_id" ] && continue
-    activity=$(zcode_latest_activity "" "$sess_id")
+    rollout="$zcode_rollout_dir/model-io-$sess_id.jsonl"
+    activity=$(zcode_latest_activity "" "$sess_id" "$rollout")
     title=$(echo "$activity" | cut -f1)
     preview=$(echo "$activity" | cut -f2)
     zcode_ts=$(echo "$activity" | cut -f3)
-    rollout="$zcode_rollout_dir/model-io-$sess_id.jsonl"
     running=$(recently_modified "$rollout" 15)
     emit "$sess_id" "zcode" "${title:-ZCode}" "" "${preview:-}" "zcode" "$zcode_ts" "$running" "" "" "$rollout" "recent_rollout"
   done
@@ -927,5 +960,353 @@ if source_enabled "deepseek"; then
     term=$(detect_terminal "$pid")
     running=$(recently_modified "$latest_session" 15)
     emit "deepseek-$pid" "deepseek" "${title:-DeepSeek}" "$(short_cwd "$cwd")" "$preview" "$term" "$last_ts" "$running" "$(short_cwd "$cwd")" "$cwd" "$latest_session" "single_recent_session"
+  fi
+fi
+
+# ── Generic process helper for file-based agents ────────
+# Match a running agent CLI by scanning ps command fields for the binary
+# name (works for direct binaries AND node/npm shim invocations like
+# `node /path/bin/gemini`). Fixture file overrides ps for tests.
+agent_process_pids() {
+  local name="$1" fixture="${2:-}"
+  if [ -n "$fixture" ]; then
+    list_fixture_pids "$fixture"
+    return
+  fi
+  ps -axo pid,command 2>/dev/null | awk -v n="$name" '
+    /awk -v n=/ { next }
+    {
+      for (i = 2; i <= NF; i++) {
+        if ($i == n || $i ~ ("/" n "$")) { print $1; break }
+      }
+    }'
+}
+
+# ── Native Gemini CLI / Qwen Code ────────────────────────
+# Google's gemini CLI (and its fork qwen-code) store chats at
+#   <tmp>/<project-slug>/chats/session-<date>-<id>.jsonl
+# with a .project_root file next to chats/ holding the real cwd, and a
+# header line {sessionId, startTime, lastUpdated} on line 1. Records:
+#   {type:"user", timestamp, content:[{text}]}
+#   {type:"gemini", timestamp, content:"...", toolCalls:[...]}
+gemini_cli_chats_activity() {
+  local file="$1"
+  [ -z "$file" ] || [ ! -f "$file" ] && { print -r -- "			"; return; }
+  python3 - "$file" <<'PY' 2>/dev/null
+import json, sys
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return ""
+
+title = ""
+preview = ""
+last_ts = ""
+try:
+    with open(sys.argv[1]) as f:
+        for line in f:
+            try: d = json.loads(line)
+            except: continue
+            if not isinstance(d, dict): continue
+            t = d.get("type", "")
+            ts = d.get("timestamp") or ""
+            if ts: last_ts = ts
+            if t == "user":
+                txt = text_of(d.get("content"))
+                if txt and not title and not txt.lstrip().startswith(("<", "[")):
+                    title = txt.strip().split("\n")[0][:60]
+            elif t in ("gemini", "model", "assistant"):
+                txt = text_of(d.get("content"))
+                if txt:
+                    preview = txt.strip().split("\n")[0][:70]
+                else:
+                    tcs = d.get("toolCalls") or []
+                    if isinstance(tcs, list) and tcs and isinstance(tcs[0], dict):
+                        fn = tcs[0].get("name") or (tcs[0].get("function") or {}).get("name") or ""
+                        if fn:
+                            preview = f"tool: {fn}"
+except: pass
+print(f"{title}\t{preview}\t{last_ts}")
+PY
+}
+
+# Shared scanner for chats-style agents (native gemini CLI, qwen).
+# Usage: scan_chats_style_agent <source> <tmp_dir> <window_secs> <fixture> <proc_name> <default_title>
+scan_chats_style_agent() {
+  local source="$1" tmp_dir="$2" window="${3:-300}" fixture="${4:-}" proc_name="$5" default_title="$6"
+  [ -d "$tmp_dir" ] || return 0
+  local recent
+  recent=$(recent_glob_candidates "$tmp_dir" "*/chats/session-*.jsonl" "$window")
+  [ -z "$recent" ] && return 0
+
+  # Attach a pid only when exactly one agent process runs, so the notch
+  # can still focus the right terminal.
+  local pids pid_count pid term=""
+  pids=$(agent_process_pids "$proc_name" "$fixture")
+  pid_count=$(count_lines "$pids")
+  pid=""
+  if [ "$pid_count" -eq 1 ]; then
+    pid=$(print -r -- "$pids" | awk 'NF { print; exit }')
+    term=$(detect_terminal "$pid")
+  fi
+
+  local f activity title preview last_ts cwd sess_id running slug_dir
+  for f in ${(f)recent}; do
+    activity=$(gemini_cli_chats_activity "$f")
+    title=$(echo "$activity" | cut -f1)
+    preview=$(echo "$activity" | cut -f2)
+    last_ts=$(echo "$activity" | cut -f3)
+    slug_dir=$(dirname "$(dirname "$f")")
+    cwd=$(cat "$slug_dir/.project_root" 2>/dev/null)
+    sess_id=$(python3 -c "import json,sys; print(json.loads(open(sys.argv[1]).readline()).get('sessionId',''))" "$f" 2>/dev/null)
+    [ -z "$sess_id" ] && sess_id=$(basename "$f" .jsonl)
+    running=$(recently_modified "$f" 15)
+    emit "$sess_id" "$source" "${title:-$default_title}" "$(short_cwd "$cwd")" "$preview" "$term" "$last_ts" "$running" "$(short_cwd "$cwd")" "$cwd" "$f" "recent_chat" "$pid"
+  done
+}
+
+if source_enabled "gemini"; then
+  scan_chats_style_agent "gemini" \
+    "${VIBE_ISLAND_GEMINI_CLI_TMP_DIR:-$HOME/.gemini/tmp}" \
+    "${VIBE_ISLAND_GEMINI_CLI_ACTIVE_WINDOW_SECS:-300}" \
+    "${VIBE_ISLAND_GEMINI_CLI_PROCESS_FIXTURE:-}" \
+    "gemini" "Gemini CLI"
+fi
+
+if source_enabled "qwen"; then
+  scan_chats_style_agent "qwen" \
+    "${VIBE_ISLAND_QWEN_TMP_DIR:-$HOME/.qwen/tmp}" \
+    "${VIBE_ISLAND_QWEN_ACTIVE_WINDOW_SECS:-300}" \
+    "${VIBE_ISLAND_QWEN_PROCESS_FIXTURE:-}" \
+    "qwen" "Qwen Code"
+fi
+
+# ── Kimi CLI (Moonshot) ──────────────────────────────────
+# Kimi Code CLI stores wire logs at either
+#   ~/.kimi/sessions/<group>/<session>/wire.jsonl            or
+#   ~/.kimi-code/sessions/<ws>/<session>/agents/<id>/wire.jsonl
+# The wire format is not a stable public contract, so parsing is
+# intentionally lenient (role/type hints + recursive text extraction).
+kimi_wire_activity() {
+  local file="$1"
+  [ -z "$file" ] || [ ! -f "$file" ] && { print -r -- "			"; return; }
+  python3 - "$file" <<'PY' 2>/dev/null
+import json, sys
+
+def walk_text(node):
+    if isinstance(node, str):
+        return node
+    if isinstance(node, dict):
+        for key in ("text", "content", "input", "message"):
+            value = node.get(key)
+            if isinstance(value, str) and value:
+                return value
+            if isinstance(value, (dict, list)):
+                got = walk_text(value)
+                if got:
+                    return got
+    if isinstance(node, list):
+        for item in node:
+            got = walk_text(item)
+            if got:
+                return got
+    return ""
+
+def role_of(d):
+    for key in ("role", "type", "speaker"):
+        value = d.get(key)
+        if isinstance(value, str) and value:
+            return value.lower()
+    return ""
+
+title = ""
+preview = ""
+last_ts = ""
+try:
+    with open(sys.argv[1]) as f:
+        for line in f:
+            try: d = json.loads(line)
+            except: continue
+            if not isinstance(d, dict): continue
+            ts = d.get("timestamp") or d.get("time") or ""
+            if isinstance(ts, str) and ts: last_ts = ts
+            nested = d.get("record") if isinstance(d.get("record"), dict) else d
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            role = role_of(d) or role_of(nested) or role_of(msg)
+            if role in ("user", "human") and not title:
+                txt = walk_text(d)
+                if txt and not txt.lstrip().startswith(("<", "[")):
+                    title = txt.strip().split("\n")[0][:60]
+            elif role in ("assistant", "agent", "kimi", "ai", "model"):
+                txt = walk_text(d)
+                if txt:
+                    preview = txt.strip().split("\n")[0][:70]
+except: pass
+print(f"{title}\t{preview}\t{last_ts}")
+PY
+}
+
+if source_enabled "kimi"; then
+  kimi_window="${VIBE_ISLAND_KIMI_ACTIVE_WINDOW_SECS:-300}"
+  kimi_fixture="${VIBE_ISLAND_KIMI_PROCESS_FIXTURE:-}"
+  kimi_roots="${VIBE_ISLAND_KIMI_SESSIONS_DIR:-$HOME/.kimi/sessions:$HOME/.kimi-code/sessions}"
+  typeset -A seen_kimi=()
+  for root in ${(s.:.)kimi_roots}; do
+    [ -d "$root" ] || continue
+    # Both layouts: <root>/<g>/<session>/wire.jsonl and
+    # <root>/<ws>/<session>/agents/<agent>/wire.jsonl
+    kimi_wires=$(recent_glob_candidates "$root" "*/*/wire.jsonl" "$kimi_window")
+    kimi_wires="$kimi_wires
+$(recent_glob_candidates "$root" "*/*/*/*/wire.jsonl" "$kimi_window")"
+    for wf in ${(f)kimi_wires}; do
+      [ -z "$wf" ] && continue
+      # Session dir is the component before an optional agents/<agent> tail.
+      sess_dir_name=$(print -r -- "${wf#$root/}" | awk -F/ '{ if ($(NF-2)=="agents") print $(NF-3); else print $(NF-1) }')
+      [ -z "$sess_dir_name" ] && continue
+      (( ${+seen_kimi[$sess_dir_name]} )) && continue
+      seen_kimi[$sess_dir_name]=1
+      activity=$(kimi_wire_activity "$wf")
+      k_title=$(echo "$activity" | cut -f1)
+      k_preview=$(echo "$activity" | cut -f2)
+      k_ts=$(echo "$activity" | cut -f3)
+      running=$(recently_modified "$wf" 15)
+      emit "$sess_dir_name" "kimi" "${k_title:-Kimi}" "" "$k_preview" "" "$k_ts" "$running" "" "" "$wf" "recent_wire" ""
+    done
+  done
+fi
+
+# ── OpenCode ─────────────────────────────────────────────
+# OpenCode shards its data under ~/.local/share/opencode/storage:
+#   session/<project-hash|global>/<id>.json   {id,title,parentID,directory,time}
+#   message/<session-id>/<msg-id>.json        {id,role,sessionID,time,parts?}
+#   message_part/<session-id>/<msg-id>/*.json {type:"text",text}
+# Subagent sessions carry a parentID and are skipped.
+if source_enabled "opencode"; then
+  opencode_storage="${VIBE_ISLAND_OPENCODE_STORAGE_DIR:-$HOME/.local/share/opencode/storage}"
+  opencode_window="${VIBE_ISLAND_OPENCODE_ACTIVE_WINDOW_SECS:-300}"
+  if [ -d "$opencode_storage" ]; then
+    opencode_rows=$(python3 - "$opencode_storage" "$(epoch_now)" "$opencode_window" <<'PY' 2>/dev/null
+import glob, json, os, sys
+
+storage = os.path.expanduser(sys.argv[1])
+now_epoch = int(sys.argv[2])
+window = int(sys.argv[3])
+
+def part_text(storage, sid, mid):
+    for part_root in (os.path.join(storage, "message_part", sid, mid),
+                      os.path.join(storage, "part", mid)):
+        for pp in sorted(glob.glob(os.path.join(part_root, "*.json")),
+                         key=os.path.getmtime, reverse=True)[:4]:
+            try:
+                with open(pp) as fh:
+                    pd = json.load(fh)
+            except Exception:
+                continue
+            if not isinstance(pd, dict) or pd.get("type") != "text":
+                continue
+            blob = pd.get("text")
+            if not blob and isinstance(pd.get("data"), dict):
+                blob = pd["data"].get("text")
+            if isinstance(blob, str) and blob.strip():
+                return blob.strip()
+    return ""
+
+def message_text(storage, sid, m):
+    if isinstance(m.get("parts"), list):
+        text = " ".join(str(p.get("text") or "") for p in m["parts"]
+                        if isinstance(p, dict) and p.get("type") == "text").strip()
+        if text:
+            return text
+    return part_text(storage, sid, str(m.get("id") or ""))
+
+rows = []
+pattern = os.path.join(storage, "session", "*", "*.json")
+for path in glob.glob(pattern):
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        continue
+    if now_epoch - mtime >= window:
+        continue
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+    except Exception:
+        continue
+    if not isinstance(d, dict) or d.get("parentID"):
+        continue
+    sid = str(d.get("id") or os.path.basename(path)[:-5])
+    cwd = str(d.get("directory") or d.get("cwd") or "")
+    t = d.get("time") if isinstance(d.get("time"), dict) else {}
+    last_ts = str(t.get("updated") or t.get("end") or t.get("created") or "")
+
+    msgs = []
+    msg_dir = os.path.join(storage, "message", sid)
+    if os.path.isdir(msg_dir):
+        for mp in glob.glob(os.path.join(msg_dir, "*.json")):
+            try:
+                msgs.append((int(os.path.getmtime(mp)), mp))
+            except OSError:
+                continue
+    msgs.sort()
+
+    running = False
+    title = str(d.get("title") or "").strip()
+    preview = ""
+    first_user = ""
+    newest_mtime = mtime
+    if msgs:
+        newest_mtime = msgs[-1][0]
+        running = (now_epoch - newest_mtime) < 15
+        loaded = []
+        for mm, mp in msgs:
+            try:
+                with open(mp) as fh:
+                    m = json.load(fh)
+            except Exception:
+                continue
+            if isinstance(m, dict):
+                loaded.append(m)
+        if not title:
+            for m in loaded:  # oldest → newest: first user prompt
+                if str(m.get("role") or "") == "user":
+                    text = message_text(storage, sid, m)
+                    if text and not text.lstrip().startswith(("<", "[")):
+                        first_user = text.split("\n")[0][:60]
+                        break
+        for m in reversed(loaded):  # newest → oldest: last assistant text
+            if str(m.get("role") or "") == "assistant":
+                text = message_text(storage, sid, m)
+                if text:
+                    preview = text.split("\n")[0][:70]
+                    break
+
+    print("\t".join([sid, title or first_user, preview, last_ts, cwd, path,
+                     "true" if running else "false"]))
+PY
+)
+    # Attach a pid only when exactly one opencode process runs.
+    opencode_pids=$(agent_process_pids "opencode" "${VIBE_ISLAND_OPENCODE_PROCESS_FIXTURE:-}")
+    oc_pid=""
+    oc_term=""
+    if [ "$(count_lines "$opencode_pids")" -eq 1 ]; then
+      oc_pid=$(print -r -- "$opencode_pids" | awk 'NF { print; exit }')
+      oc_term=$(detect_terminal "$oc_pid")
+    fi
+    for orow in ${(f)opencode_rows}; do
+      [ -z "$orow" ] && continue
+      o_sid=$(echo "$orow" | cut -f1)
+      o_title=$(echo "$orow" | cut -f2)
+      o_preview=$(echo "$orow" | cut -f3)
+      o_ts=$(echo "$orow" | cut -f4)
+      o_cwd=$(echo "$orow" | cut -f5)
+      o_path=$(echo "$orow" | cut -f6)
+      o_running=$(echo "$orow" | cut -f7)
+      [ "$o_running" = "true" ] || o_running="false"
+      emit "$o_sid" "opencode" "${o_title:-OpenCode}" "$(short_cwd "$o_cwd")" "$o_preview" "$oc_term" "$o_ts" "$o_running" "$(short_cwd "$o_cwd")" "$o_cwd" "$o_path" "recent_session" "$oc_pid"
+    done
   fi
 fi

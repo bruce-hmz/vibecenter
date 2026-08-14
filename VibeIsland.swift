@@ -362,6 +362,8 @@ struct AgentSession: Identifiable {
         case "deepseek": return Color(red: 96/255,  green: 165/255, blue: 250/255)  // blue (DeepSeek blue)
         case "kimi":     return Color(red: 236/255, green: 72/255,  blue: 153/255)  // pink
         case "grok":     return Color(red: 255/255, green: 255/255, blue: 255/255)  // white
+        case "qwen":     return Color(red: 122/255, green: 110/255, blue: 245/255)  // indigo (Qwen Code)
+        case "opencode": return Color(red: 245/255, green: 158/255, blue: 11/255)   // amber (OpenCode)
         default:         return Color(red: 156/255, green: 163/255, blue: 175/255)
         }
     }
@@ -4453,6 +4455,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 preview = self.readCodexPreview(sessionID: sessionID)
             case "claude":
                 preview = self.readClaudePreview(sessionID: sessionID)
+            case "gemini", "qwen":
+                preview = self.readGeminiChatPreview(sessionID: sessionID)
             default:
                 preview = nil
             }
@@ -4519,6 +4523,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         return lastText.isEmpty ? nil : String(lastText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(70))
+    }
+
+    // Read the latest model reply from a native Gemini CLI / Qwen Code chat
+    // file (JSONL records with type "gemini"/"model"). Antigravity log files
+    // fail JSON parsing and return nil.
+    private func readGeminiChatPreview(sessionID: String) -> String? {
+        guard let sess = viewModel.sessions[sessionID] else { return nil }
+        guard let path = sess.transcriptPath, !path.isEmpty else { return nil }
+        guard let data = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        var preview = ""
+        for line in data.split(separator: "\n") {
+            guard let lineData = line.data(using: .utf8),
+                  let d = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+            let type = (d["type"] as? String) ?? ""
+            guard type == "gemini" || type == "model" || type == "assistant" else { continue }
+            if let content = d["content"] as? String, !content.isEmpty {
+                preview = content
+            } else if let tcs = d["toolCalls"] as? [[String: Any]], let tc = tcs.first {
+                let fn = tc["name"] as? String
+                    ?? (tc["function"] as? [String: Any])?["name"] as? String ?? ""
+                if !fn.isEmpty { preview = "tool: \(fn)" }
+            }
+        }
+        return preview.isEmpty
+            ? nil
+            : String(preview.trimmingCharacters(in: .whitespacesAndNewlines).prefix(70))
     }
 
     // Read the latest assistant reply from ZCode's rollout file.

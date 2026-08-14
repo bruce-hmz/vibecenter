@@ -30,6 +30,7 @@ class ScanAgentsTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+        self.last_stderr = result.stderr
         lines = [line for line in result.stdout.splitlines() if line.strip()]
         return [json.loads(line) for line in lines]
 
@@ -435,6 +436,277 @@ class ScanAgentsTests(unittest.TestCase):
             )
 
             self.assertEqual(sessions, [])
+
+    def test_claude_project_dir_without_transcripts_is_silent(self) -> None:
+        # Regression: an existing project dir with no .jsonl transcripts used
+        # to leak zsh's "no matches found" error to stderr.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            cwd = "/tmp/workspace/empty-project"
+            encoded = cwd.replace("/", "-")
+            (tmpdir / "claude-projects" / encoded).mkdir(parents=True)
+
+            fixture = tmpdir / "claude-fixture.tsv"
+            write_text(fixture, f"123\t{cwd}\tclaude\t{now_epoch - 20}\n")
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "claude",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_CLAUDE_PROJECTS": str(tmpdir / "claude-projects"),
+                    "VIBE_ISLAND_CLAUDE_PROCESS_FIXTURE": str(fixture),
+                }
+            )
+
+            self.assertEqual(sessions, [])
+            self.assertNotIn("no matches found", self.last_stderr)
+
+    def test_zcode_title_falls_back_to_rollout_first_user_message(self) -> None:
+        # Newer ZCode versions don't always create ~/.zcode/cli/agents/<sess>
+        # for main sessions; the title must come from the rollout's first
+        # user prompt instead of degrading to "ZCode".
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            rollout_dir = tmpdir / "zcode-rollout"
+            rollout = rollout_dir / "model-io-sess_active.jsonl"
+            write_text(
+                rollout,
+                textwrap.dedent(
+                    """
+                    {"startedAt":"2026-08-14T06:42:01.000Z","completedAt":"2026-08-14T06:42:04.560Z","request":{"messages":[{"role":"system","content":"Generate a concise title for this coding session."},{"role":"user","content":[{"type":"text","text":"修复登录页面的样式 bug"}]}]},"response":{"text":"开始分析"}}
+                    {"startedAt":"2026-08-14T06:43:00.000Z","completedAt":"2026-08-14T06:43:05.000Z","request":{"messages":[{"role":"user","content":"<file_changed>/tmp/x</file_changed>"}]},"response":{"toolCalls":[{"toolName":"Read"}]}}
+                    """
+                ).strip()
+                + "\n",
+            )
+            set_mtime(rollout, now_epoch - 5)
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "zcode",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_ZCODE_APP_RUNNING": "true",
+                    "VIBE_ISLAND_ZCODE_ROLLOUT_DIR": str(rollout_dir),
+                    "VIBE_ISLAND_ZCODE_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertEqual(session["source"], "zcode")
+            self.assertEqual(session["task"], "修复登录页面的样式 bug")
+            self.assertEqual(session["preview"], "开始分析")
+
+    def test_gemini_cli_emits_recent_chat_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            cwd = "/tmp/workspace/gemini-cli-project"
+            slug = tmpdir / "gemini-tmp" / "gemini-cli-project-1"
+            chat = slug / "chats" / "session-2026-08-14T06-40-ab12cd34.jsonl"
+            write_text(
+                chat,
+                textwrap.dedent(
+                    """
+                    {"sessionId":"ab12cd34-1111-2222-3333-444455556666","startTime":"2026-08-14T06:40:00.000Z","lastUpdated":"2026-08-14T06:41:00.000Z","kind":"main"}
+                    {"id":"m1","timestamp":"2026-08-14T06:40:10.000Z","type":"user","content":[{"text":"<session_context>\\nsetup"}]}
+                    {"id":"m2","timestamp":"2026-08-14T06:40:20.000Z","type":"user","content":[{"text":"帮我优化数据库查询"}]}
+                    {"id":"m3","timestamp":"2026-08-14T06:41:00.000Z","type":"gemini","content":"正在检查索引","toolCalls":[]}
+                    """
+                ).strip()
+                + "\n",
+            )
+            set_mtime(chat, now_epoch - 5)
+            write_text(slug / ".project_root", cwd + "\n")
+
+            fixture = tmpdir / "gemini-cli-fixture.tsv"
+            write_text(fixture, f"901\t{cwd}\t/opt/gemini\t{now_epoch - 60}\n")
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "gemini",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_GEMINI_CLI_TMP_DIR": str(tmpdir / "gemini-tmp"),
+                    "VIBE_ISLAND_GEMINI_CLI_PROCESS_FIXTURE": str(fixture),
+                    "VIBE_ISLAND_GEMINI_CLI_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertEqual(session["source"], "gemini")
+            self.assertEqual(session["session_id"], "ab12cd34-1111-2222-3333-444455556666")
+            self.assertEqual(session["task"], "帮我优化数据库查询")
+            self.assertEqual(session["preview"], "正在检查索引")
+            self.assertEqual(session["cwd"], cwd)
+            self.assertEqual(session["transcript_path"], str(chat))
+            self.assertEqual(session["pid"], "901")
+            self.assertTrue(session["running"])
+
+    def test_qwen_uses_same_chat_scanner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            slug = tmpdir / "qwen-tmp" / "qwen-project"
+            chat = slug / "chats" / "session-2026-08-14T07-00-99aabbcc.jsonl"
+            write_text(
+                chat,
+                textwrap.dedent(
+                    """
+                    {"sessionId":"99aabbcc-aaaa-bbbb-cccc-ddddeeeeffff","startTime":"2026-08-14T07:00:00.000Z","kind":"main"}
+                    {"id":"m1","timestamp":"2026-08-14T07:00:05.000Z","type":"user","content":[{"text":"写一个排序算法"}]}
+                    {"id":"m2","timestamp":"2026-08-14T07:00:30.000Z","type":"gemini","content":"好的，这是快速排序"}
+                    """
+                ).strip()
+                + "\n",
+            )
+            set_mtime(chat, now_epoch - 5)
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "qwen",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_QWEN_TMP_DIR": str(tmpdir / "qwen-tmp"),
+                    "VIBE_ISLAND_QWEN_ACTIVE_WINDOW_SECS": "300",
+                    # Empty fixture: no qwen process exists, so no pid is
+                    # attached (avoids matching ambient processes on the
+                    # machine running the tests).
+                    "VIBE_ISLAND_QWEN_PROCESS_FIXTURE": str(tmpdir / "empty.tsv"),
+                }
+            )
+
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertEqual(session["source"], "qwen")
+            self.assertEqual(session["task"], "写一个排序算法")
+            self.assertEqual(session["preview"], "好的，这是快速排序")
+            self.assertEqual(session["pid"], "")
+
+    def test_kimi_emits_recent_wire_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            sessions_dir = tmpdir / "kimi-sessions"
+            wire = sessions_dir / "grp1" / "sess_abc123" / "wire.jsonl"
+            write_text(
+                wire,
+                textwrap.dedent(
+                    """
+                    {"timestamp":"2026-08-14T08:00:00Z","role":"user","content":{"text":"重构配置模块"}}
+                    {"timestamp":"2026-08-14T08:00:30Z","role":"assistant","content":{"text":"先看现有结构"}}
+                    """
+                ).strip()
+                + "\n",
+            )
+            set_mtime(wire, now_epoch - 5)
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "kimi",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_KIMI_SESSIONS_DIR": str(sessions_dir),
+                    "VIBE_ISLAND_KIMI_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertEqual(session["source"], "kimi")
+            self.assertEqual(session["session_id"], "sess_abc123")
+            self.assertEqual(session["task"], "重构配置模块")
+            self.assertEqual(session["preview"], "先看现有结构")
+            self.assertEqual(session["transcript_path"], str(wire))
+
+    def test_kimi_dedupes_multiple_wires_per_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            sessions_dir = tmpdir / "kimi-sessions"
+            # kimi-code layout: <ws>/<session>/agents/<agent>/wire.jsonl
+            wire_a = sessions_dir / "ws1" / "sess_dup" / "agents" / "agent1" / "wire.jsonl"
+            write_text(wire_a, '{"timestamp":"2026-08-14T08:00:00Z","role":"user","content":{"text":"第一个"}}\n')
+            set_mtime(wire_a, now_epoch - 10)
+            wire_b = sessions_dir / "ws1" / "sess_dup" / "agents" / "agent2" / "wire.jsonl"
+            write_text(wire_b, '{"timestamp":"2026-08-14T08:01:00Z","role":"assistant","content":{"text":"第二个"}}\n')
+            set_mtime(wire_b, now_epoch - 4)
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "kimi",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_KIMI_SESSIONS_DIR": str(sessions_dir),
+                    "VIBE_ISLAND_KIMI_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["session_id"], "sess_dup")
+
+    def test_opencode_emits_recent_session_with_message_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            storage = tmpdir / "opencode-storage"
+            cwd = "/tmp/workspace/opencode-project"
+            session = storage / "session" / "hash1" / "ses_op1.json"
+            write_text(session, json.dumps({
+                "id": "ses_op1",
+                "title": "",
+                "directory": cwd,
+                "time": {"created": "2026-08-14T09:00:00.000Z"},
+            }))
+            set_mtime(session, now_epoch - 30)
+            msg_dir = storage / "message" / "ses_op1"
+            user_msg = msg_dir / "msg_001_u.json"
+            write_text(user_msg, json.dumps({"id": "msg_001_u", "role": "user", "parts": [{"type": "text", "text": "修复 CI 失败"}]}))
+            set_mtime(user_msg, now_epoch - 25)
+            assistant_msg = msg_dir / "msg_002_a.json"
+            write_text(assistant_msg, json.dumps({"id": "msg_002_a", "role": "assistant", "parts": [{"type": "text", "text": "查看构建日志"}]}))
+            set_mtime(assistant_msg, now_epoch - 5)
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "opencode",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_OPENCODE_STORAGE_DIR": str(storage),
+                    "VIBE_ISLAND_OPENCODE_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+
+            self.assertEqual(len(sessions), 1)
+            found = sessions[0]
+            self.assertEqual(found["source"], "opencode")
+            self.assertEqual(found["session_id"], "ses_op1")
+            self.assertEqual(found["task"], "修复 CI 失败")
+            self.assertEqual(found["preview"], "查看构建日志")
+            self.assertEqual(found["cwd"], cwd)
+            # The newest message file was written 5s ago → running.
+            self.assertTrue(found["running"])
+
+    def test_opencode_skips_subagent_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            storage = tmpdir / "opencode-storage"
+            top = storage / "session" / "hash1" / "ses_top.json"
+            write_text(top, json.dumps({"id": "ses_top", "title": "top", "directory": "/tmp/p", "time": {"created": "2026-08-14T09:00:00.000Z"}}))
+            set_mtime(top, now_epoch - 5)
+            sub = storage / "session" / "hash1" / "ses_sub.json"
+            write_text(sub, json.dumps({"id": "ses_sub", "title": "sub", "parentID": "ses_top", "directory": "/tmp/p", "time": {"created": "2026-08-14T09:00:10.000Z"}}))
+            set_mtime(sub, now_epoch - 4)
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "opencode",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_OPENCODE_STORAGE_DIR": str(storage),
+                    "VIBE_ISLAND_OPENCODE_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+
+            self.assertEqual([s["session_id"] for s in sessions], ["ses_top"])
 
 
 if __name__ == "__main__":
