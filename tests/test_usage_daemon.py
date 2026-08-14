@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 
-ROOT = pathlib.Path("/Volumes/RTL9210/workspace/claude-projects/vibe-island-app")
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 USAGE_DAEMON_PATH = ROOT / "usage-daemon.py"
 
 

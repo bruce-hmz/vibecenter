@@ -7,7 +7,7 @@ import textwrap
 import unittest
 
 
-ROOT = pathlib.Path("/Volumes/RTL9210/workspace/claude-projects/vibe-island-app")
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCAN_SCRIPT = ROOT / "scan-agents.sh"
 
 
