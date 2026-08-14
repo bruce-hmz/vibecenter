@@ -49,6 +49,22 @@ paths/window overridden with `VIBE_ISLAND_<SOURCE>_*` env vars (see
 
 ## Quick Start
 
+### Option 0: Pre-built packages (GitHub Actions)
+
+Every push runs CI (`.github/workflows/build.yml`): full test matrix plus
+packaged installers for both platforms, uploaded as workflow artifacts.
+Pushing a `v*` tag publishes them as a GitHub Release:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+- `VibeCenter-macos-arm64.zip` — VibeIsland.app (ad-hoc signed; on first
+  launch remove the quarantine flag:
+  `xattr -d com.apple.quarantine /Applications/VibeIsland.app`)
+- `VibeCenter-windows-x64.zip` — VibeCenter.exe + VibeCenterRelay.exe
+  (single-file PyInstaller, no Python needed on the target)
+
 ### Option A: Pre-built .app
 ```bash
 ./build-app.sh --install
@@ -120,6 +136,24 @@ can be overridden with `VIBE_ISLAND_USAGE_*` env vars for testing.)
 - macOS 13+ (Ventura / Sonoma / Sequoia / Tahoe)
 - Apple Silicon (arm64)
 - Works with or without a physical notch (draws a fake one)
+
+## Windows
+
+A Windows port lives in [`windows/`](windows/) — a PySide6 (Qt) app that
+reuses the same protocols: the pure-Python port of the agent scanner (all
+9 agents), HMAC-authenticated TCP IPC on 14321 (byte-compatible with
+relay.py), approval/ask cards with fail-closed timeout, multi-provider
+usage carousel, tray menu, and a one-click Claude Code hook installer.
+On Windows 10/11:
+
+```powershell
+cd windows
+.\run.bat          # installs PySide6 on first run, then starts the panel
+```
+
+See [windows/README.md](windows/README.md) for details. Logic tests
+(scanner fixtures, IPC round-trips with the real relay signing code) run
+on any OS: `python -m pytest windows/tests -q`.
 
 ## Credits
 

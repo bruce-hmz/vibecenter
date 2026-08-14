@@ -14,3 +14,7 @@ vibe-island
 
 # Keep: source, scripts, fonts, logos, docs
 .omx/
+
+# PyInstaller output
+dist/
+*.spec

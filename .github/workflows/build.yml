@@ -1,0 +1,121 @@
+name: build
+
+# Builds installers for both platforms on every push/PR, runs the full
+# test matrix, and publishes GitHub Releases on v* tags.
+#   macOS:   tests + swiftc build → VibeCenter-macos-arm64.zip (VibeIsland.app)
+#   Windows: tests + PyInstaller  → VibeCenter-windows-x64.zip (panel + relay exe)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS arm64 — tests + .app
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python tests (relay / usage / scanner)
+        run: |
+          python3 -m pip install --quiet pytest
+          python3 -m pytest tests/ -q
+
+      - name: Swift tests
+        run: ./tests/run_swift_tests.sh
+
+      - name: Build .app
+        run: ./build-app.sh
+
+      - name: Ad-hoc codesign
+        run: codesign --force --deep --sign - build/VibeIsland.app
+
+      - name: Package
+        run: |
+          cd build
+          ditto -c -k --keepParent VibeIsland.app VibeCenter-macos-arm64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeCenter-macos-arm64
+          path: build/VibeCenter-macos-arm64.zip
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" --generate-notes --verify-tag || true
+          gh release upload "$TAG" build/VibeCenter-macos-arm64.zip --clobber
+
+  windows:
+    name: Windows x64 — tests + exe
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: python -m pip install --quiet PySide6 pyinstaller pytest
+
+      - name: Python tests (scanner / IPC / frozen)
+        run: python -m pytest windows/tests -q
+
+      - name: Build panel exe
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed --name VibeCenter
+          --add-data "relay.py;."
+          --add-data "usage-daemon.py;."
+          --add-data "DepartureMono-Regular.otf;."
+          windows/launch.py
+
+      - name: Build relay exe
+        run: >
+          pyinstaller --noconfirm --clean --onefile --console --name VibeCenterRelay
+          relay.py
+
+      - name: Smoke-test panel exe (offscreen self-test)
+        run: dist/VibeCenter.exe --self-test
+
+      - name: Smoke-test relay exe
+        shell: pwsh
+        run: |
+          $env:VIBE_ISLAND_NOW_EPOCH = "0"   # keep the hook off the network path
+          '{"hook_event_name":"SessionEnd","session_id":"ci-smoke"}' | Out-String | dist/VibeCenterRelay.exe
+          if ($LASTEXITCODE -ne 0) { throw "relay exe exited $LASTEXITCODE" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/VibeCenter.exe, dist/VibeCenterRelay.exe, windows/README.md `
+            -DestinationPath VibeCenter-windows-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeCenter-windows-x64
+          path: VibeCenter-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
+          gh release create $tag --generate-notes --verify-tag || true
+          gh release upload $tag VibeCenter-windows-x64.zip --clobber
