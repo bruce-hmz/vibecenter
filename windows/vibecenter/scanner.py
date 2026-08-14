@@ -258,10 +258,11 @@ def _decode_claude_project_dir(encoded: str) -> str:
     """Best-effort decode of the encoded project dir back to a path."""
     value = encoded.replace("-", os.sep)
     if os.name == "nt":
-        # Windows encodes like 'C--Users-x-proj'; restore the drive colon.
-        m = re.match(r"^([A-Za-z])" + re.escape(os.sep) + os.sep, value)
-        if m:
-            value = m.group(1) + ":" + value[len(m.group(1)) + 1:]
+        # Windows encodes 'C--Users-x-proj' → 'C:\\Users\\x\\proj' before
+        # the separator swap; restore the drive colon without regex (a
+        # trailing unescaped backslash breaks re on Windows).
+        if len(value) >= 3 and value[1] == os.sep and value[2] == os.sep:
+            value = value[0] + ":" + value[2:]
         return value
     if value.startswith(os.sep):
         return value
