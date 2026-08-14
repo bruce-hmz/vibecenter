@@ -23,10 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Python tests (relay / usage / scanner)
         run: |
-          python3 -m pip install --quiet pytest
-          python3 -m pytest tests/ -q
+          python -m pip install --quiet pytest
+          python -m pytest tests/ -q
 
       - name: Swift tests
         run: ./tests/run_swift_tests.sh

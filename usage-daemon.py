@@ -13,7 +13,6 @@ short-lived per hook event). Every poll interval it:
 Usage:
   nohup python3 usage-daemon.py &> /tmp/vibe-usage.log &
 """
-import fcntl
 import json
 import hashlib
 import hmac
@@ -27,6 +26,12 @@ import urllib.request
 import uuid
 import datetime
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows — use the CRT byte-range lock instead.
+    fcntl = None
+    import msvcrt
 
 HOST, PORT = "127.0.0.1", 14321
 DEFAULT_POLL_INTERVAL = 120.0
@@ -195,7 +200,15 @@ def acquire_single_instance_lock(lock_path=None):
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
     handle = open(target_path, "a+", encoding="utf-8")
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                handle.close()
+                return None
     except BlockingIOError:
         handle.close()
         return None

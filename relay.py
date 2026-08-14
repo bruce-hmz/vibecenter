@@ -10,7 +10,6 @@ invalid data.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import hashlib
 import hmac
@@ -21,6 +20,12 @@ import time
 import uuid
 from contextlib import contextmanager
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows — use the CRT byte-range lock instead.
+    fcntl = None
+    import msvcrt
 
 HOST = "127.0.0.1"
 PORT = 14321
@@ -513,15 +518,34 @@ def _dedup_key(event: dict[str, Any]) -> str:
     return "tt:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _lock_exclusive(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    else:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
+
+def _unlock(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    else:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
+
 @contextmanager
 def _dedup_locked():
     os.makedirs(os.path.dirname(DEDUP_LOCK) or ".", exist_ok=True)
     lock = open(DEDUP_LOCK, "a+")
     try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _lock_exclusive(lock)
         yield
     finally:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        _unlock(lock)
         lock.close()
 
 
