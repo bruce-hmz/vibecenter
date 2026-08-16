@@ -512,7 +512,9 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
                 with mock.patch.object(
                         self.module, "http_get_json",
                         side_effect=OSError("down")):
-                    snapshot = self.module.poll_opencode_go()
+                    with mock.patch.object(self.module, "push_usage",
+                                           return_value=True):
+                        snapshot = self.module.poll_opencode_go()
                 self.assertEqual(snapshot["seven_day"], 4)
                 self.assertNotIn("five_hour", snapshot)
 
