@@ -108,6 +108,8 @@ Polled providers (pushed into the rotating usage strip):
   and issues the same `loadCodeAssist` HEALTH_CHECK the CLI's `/about`
   uses: plan tier (Free / AI Pro / AI Ultra) + Google One AI credit
   balance for paid plans
+- **OpenCode Go** — reads the quota cache kept by the local opencodex
+  service (`~/.opencodex/codex-quota-cache.json`): weekly percent + reset
 - any other OpenAI-compatible provider configured in ZCode
 
 Poll interval/config paths can be overridden with `VIBE_ISLAND_*` env

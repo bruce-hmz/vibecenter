@@ -416,5 +416,78 @@ class CodexUsageTests(unittest.TestCase):
                 self.assertIsNone(self.module.read_codex_usage())
 
 
+class OpenCodeGoQuotaTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_usage_daemon()
+
+    def _cache(self, tmpdir, quotas):
+        path = pathlib.Path(tmpdir) / "codex-quota-cache.json"
+        path.write_text(json.dumps({"version": 1, "quotas": quotas}),
+                        encoding="utf-8")
+        return str(path)
+
+    def test_reads_weekly_percent_and_reset(self):
+        import time
+
+        now_ms = int(time.time() * 1000)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp, {"__main__": {
+                "updatedAt": now_ms - 60_000,
+                "weeklyPercent": 4,
+                "weeklyResetAt": int(time.time()) + 3600,
+                "resetCredits": 0}})
+            with mock.patch.dict(os.environ,
+                                 {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": cache}):
+                snapshot = self.module.read_opencode_quota()
+        self.assertEqual(snapshot["provider"], "OpenCode")
+        self.assertEqual(snapshot["plan"], "Go")
+        self.assertEqual(snapshot["seven_day"], 4)
+        self.assertIn("seven_day_reset", snapshot)
+        self.assertNotIn("credits", snapshot)
+
+    def test_credits_only_when_no_weekly_percent(self):
+        import time
+
+        now_ms = int(time.time() * 1000)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp, {"go": {
+                "updatedAt": now_ms - 60_000,
+                "weeklyPercent": None,
+                "resetCredits": 1250}})
+            with mock.patch.dict(os.environ,
+                                 {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": cache}):
+                snapshot = self.module.read_opencode_quota()
+        self.assertEqual(snapshot["credits"], "1,250")
+        self.assertNotIn("seven_day", snapshot)
+
+    def test_picks_newest_entry_and_skips_stale_cache(self):
+        import time
+
+        now_ms = int(time.time() * 1000)
+        stale = {"old": {"updatedAt": now_ms - 8 * 86400 * 1000,
+                         "weeklyPercent": 90, "weeklyResetAt": now_ms // 1000}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE":
+                                              self._cache(tmp, stale)}):
+                self.assertIsNone(self.module.read_opencode_quota())
+        fresh = {
+            "a": {"updatedAt": now_ms - 3_600_000, "weeklyPercent": 1,
+                  "weeklyResetAt": int(time.time()) + 7200},
+            "b": {"updatedAt": now_ms - 60_000, "weeklyPercent": 7,
+                  "weeklyResetAt": int(time.time()) + 7200},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE":
+                                              self._cache(tmp, fresh)}):
+                snapshot = self.module.read_opencode_quota()
+        self.assertEqual(snapshot["seven_day"], 7)
+
+    def test_missing_cache_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE":
+                                              os.path.join(tmp, "none.json")}):
+                self.assertIsNone(self.module.read_opencode_quota())
+
+
 if __name__ == "__main__":
     unittest.main()

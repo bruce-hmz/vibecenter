@@ -732,6 +732,73 @@ def poll_codex_usage():
     return pushed
 
 
+# ── OpenCode Go plan (via the opencodex service) ────────
+# opencodex (the local agent gateway) tracks the OpenCode Go plan quota in
+# ~/.opencodex/codex-quota-cache.json and refreshes it from upstream while
+# the service runs. We surface the freshest entry: weekly percent, reset
+# time, and — when the plan tracks credits instead — the balance.
+
+OPENCODEX_QUOTA_CACHE = "~/.opencodex/codex-quota-cache.json"
+OPENCODE_QUOTA_MAX_AGE = 7 * 86400 * 1000  # ms; matches the weekly window
+
+
+def read_opencode_quota():
+    path = expand_path(
+        os.environ.get("VIBE_ISLAND_OPENCODEX_QUOTA_CACHE", OPENCODEX_QUOTA_CACHE)
+    )
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    quotas = data.get("quotas") if isinstance(data, dict) else None
+    if not isinstance(quotas, dict) or not quotas:
+        return None
+    newest = None
+    for entry in quotas.values():
+        if not isinstance(entry, dict):
+            continue
+        if newest is None or (entry.get("updatedAt") or 0) > (newest.get("updatedAt") or 0):
+            newest = entry
+    if newest is None:
+        return None
+    now_ms = int(time.time() * 1000)
+    if now_ms - (newest.get("updatedAt") or 0) > OPENCODE_QUOTA_MAX_AGE:
+        return None  # service gone / plan idle past the window
+    snapshot = {
+        "provider": "OpenCode",
+        "plan": "Go",
+    }
+    weekly = newest.get("weeklyPercent")
+    if isinstance(weekly, (int, float)):
+        used = int(round(weekly))
+        snapshot["seven_day"] = used
+        snapshot["seven_day_reset"] = _format_reset_delta(
+            newest.get("weeklyResetAt"), int(time.time()))
+        snapshot["level"] = "max" if used >= 80 else ("high" if used >= 50 else "low")
+    try:
+        credits = int(newest.get("resetCredits") or 0)
+    except (TypeError, ValueError):
+        credits = 0
+    if credits > 0 and "seven_day" not in snapshot:
+        snapshot["credits"] = f"{credits:,}"
+    if "seven_day" not in snapshot and "credits" not in snapshot:
+        return None
+    return snapshot
+
+
+def poll_opencode_go():
+    """Push the OpenCode Go plan quota, when opencodex tracks one."""
+    snapshot = read_opencode_quota()
+    if snapshot is None:
+        return None
+    if push_usage(snapshot):
+        log(f"pushed opencode go: {snapshot.get('seven_day')}%/"
+            f"{snapshot.get('seven_day_reset', '-')} credits={snapshot.get('credits', '-')}")
+        return snapshot
+    return None
+
+
 def _strip_api_suffix(base_url):
     """Normalise a provider baseURL to its root for billing endpoints."""
     url = base_url.rstrip("/")
@@ -927,6 +994,9 @@ def main():
 
             # Google AI plan (Gemini CLI login): tier + Google One AI credits.
             poll_gemini_plan()
+
+            # OpenCode Go plan (via the opencodex service quota cache).
+            poll_opencode_go()
 
             # Discover and poll every enabled provider in ZCode config.
             # Covers BigModel, Z.ai, and any OpenAI-compatible token plan.
