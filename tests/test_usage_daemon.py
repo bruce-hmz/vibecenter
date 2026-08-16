@@ -426,6 +426,96 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
                         encoding="utf-8")
         return str(path)
 
+    def test_api_snapshot_maps_all_three_windows(self):
+        import time
+
+        now = int(time.time())
+        resp = {"usage": {
+            "rolling": {"status": "ok", "percent": 5,
+                        "resetsAt": "2026-08-16T14:44:19.443Z"},
+            "weekly": {"status": "ok", "percent": 2,
+                       "resetsAt": "2026-08-17T00:00:00.443Z"},
+            "monthly": {"status": "ok", "percent": 1,
+                        "resetsAt": "2026-09-16T02:50:10.443Z"},
+        }}
+        snapshot = self.module.opencode_snapshot_from_api(resp, now_epoch=now)
+        self.assertEqual(snapshot["provider"], "OpenCode")
+        self.assertEqual(snapshot["plan"], "Go")
+        self.assertEqual(snapshot["five_hour"], 5)
+        self.assertEqual(snapshot["seven_day"], 2)
+        self.assertEqual(snapshot["monthly"], 1)
+        self.assertEqual(snapshot["level"], "low")
+        self.assertTrue(snapshot["five_hour_reset"])
+
+    def test_api_snapshot_level_takes_worst_window(self):
+        resp = {"usage": {
+            "rolling": {"percent": 85, "resetsAt": "2026-08-16T14:44:19Z"},
+            "weekly": {"percent": 2, "resetsAt": "2026-08-17T00:00:00Z"},
+        }}
+        snapshot = self.module.opencode_snapshot_from_api(resp)
+        self.assertEqual(snapshot["level"], "max")
+        self.assertNotIn("monthly", snapshot)
+
+    def test_api_snapshot_rejects_empty_payload(self):
+        self.assertIsNone(self.module.opencode_snapshot_from_api({}))
+        self.assertIsNone(self.module.opencode_snapshot_from_api(
+            {"usage": {"rolling": {"percent": None}}}))
+
+    def _config(self, tmpdir, provider):
+        path = pathlib.Path(tmpdir) / "config.json"
+        path.write_text(json.dumps({"providers": {"opencode-go": provider}}),
+                        encoding="utf-8")
+        return str(path)
+
+    def test_api_key_read_from_config_and_pool_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_CONFIG":
+                                              self._config(tmp, {"apiKey": "sk-direct"})}):
+                self.assertEqual(self.module.opencode_go_api_key(), "sk-direct")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_CONFIG":
+                                              self._config(tmp, {"apiKeyPool": [
+                                                  {"id": "1", "key": "sk-pool"}]})}):
+                self.assertEqual(self.module.opencode_go_api_key(), "sk-pool")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_CONFIG":
+                                              self._config(tmp, {"apiKey": ""})}):
+                self.assertIsNone(self.module.opencode_go_api_key())
+
+    def test_poll_prefers_api_and_falls_back_to_cache(self):
+        import time
+
+        now_ms = int(time.time() * 1000)
+        api_resp = {"usage": {
+            "rolling": {"percent": 5, "resetsAt": "2026-08-16T14:44:19Z"},
+            "weekly": {"percent": 2, "resetsAt": "2026-08-17T00:00:00Z"},
+            "monthly": {"percent": 1, "resetsAt": "2026-09-16T02:50:10Z"},
+        }}
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp, {"__main__": {
+                "updatedAt": now_ms - 60_000, "weeklyPercent": 4,
+                "weeklyResetAt": int(time.time()) + 3600}})
+            env = {"VIBE_ISLAND_OPENCODEX_CONFIG":
+                   self._config(tmp, {"apiKey": "sk-x"}),
+                   "VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": cache}
+            with mock.patch.dict(os.environ, env):
+                with mock.patch.object(self.module, "http_get_json",
+                                       return_value=api_resp) as get:
+                    with mock.patch.object(self.module, "push_usage",
+                                           return_value=True) as push:
+                        snapshot = self.module.poll_opencode_go()
+                get.assert_called_once()
+                self.assertEqual(snapshot["seven_day"], 2)
+                self.assertEqual(push.call_args[0][0]["five_hour"], 5)
+
+                # API unreachable → cache fallback (weekly 4%).
+                with mock.patch.object(
+                        self.module, "http_get_json",
+                        side_effect=OSError("down")):
+                    snapshot = self.module.poll_opencode_go()
+                self.assertEqual(snapshot["seven_day"], 4)
+                self.assertNotIn("five_hour", snapshot)
+
     def test_reads_weekly_percent_and_reset(self):
         import time
 
@@ -438,7 +528,7 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
                 "resetCredits": 0}})
             with mock.patch.dict(os.environ,
                                  {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": cache}):
-                snapshot = self.module.read_opencode_quota()
+                snapshot = self.module.read_opencode_quota_cache()
         self.assertEqual(snapshot["provider"], "OpenCode")
         self.assertEqual(snapshot["plan"], "Go")
         self.assertEqual(snapshot["seven_day"], 4)
@@ -456,7 +546,7 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
                 "resetCredits": 1250}})
             with mock.patch.dict(os.environ,
                                  {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": cache}):
-                snapshot = self.module.read_opencode_quota()
+                snapshot = self.module.read_opencode_quota_cache()
         self.assertEqual(snapshot["credits"], "1,250")
         self.assertNotIn("seven_day", snapshot)
 
@@ -469,7 +559,7 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE":
                                               self._cache(tmp, stale)}):
-                self.assertIsNone(self.module.read_opencode_quota())
+                self.assertIsNone(self.module.read_opencode_quota_cache())
         fresh = {
             "a": {"updatedAt": now_ms - 3_600_000, "weeklyPercent": 1,
                   "weeklyResetAt": int(time.time()) + 7200},
@@ -479,14 +569,14 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE":
                                               self._cache(tmp, fresh)}):
-                snapshot = self.module.read_opencode_quota()
+                snapshot = self.module.read_opencode_quota_cache()
         self.assertEqual(snapshot["seven_day"], 7)
 
     def test_missing_cache_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE":
                                               os.path.join(tmp, "none.json")}):
-                self.assertIsNone(self.module.read_opencode_quota())
+                self.assertIsNone(self.module.read_opencode_quota_cache())
 
 
 if __name__ == "__main__":

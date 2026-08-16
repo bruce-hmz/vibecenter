@@ -732,17 +732,90 @@ def poll_codex_usage():
     return pushed
 
 
-# ── OpenCode Go plan (via the opencodex service) ────────
-# opencodex (the local agent gateway) tracks the OpenCode Go plan quota in
-# ~/.opencodex/codex-quota-cache.json and refreshes it from upstream while
-# the service runs. We surface the freshest entry: weekly percent, reset
-# time, and — when the plan tracks credits instead — the balance.
+# ── OpenCode Go plan ─────────────────────────────────────
+# Primary source: the official Zen gateway usage endpoint (same data the
+# opencode.ai dashboard renders): rolling / weekly / monthly percent +
+# reset timestamps. The API key comes from the local opencodex service
+# config. Falls back to its quota cache when the API is unreachable.
 
+OPENCODEX_CONFIG = "~/.opencodex/config.json"
 OPENCODEX_QUOTA_CACHE = "~/.opencodex/codex-quota-cache.json"
+OPENCODE_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 OPENCODE_QUOTA_MAX_AGE = 7 * 86400 * 1000  # ms; matches the weekly window
 
 
-def read_opencode_quota():
+def opencode_go_api_key():
+    """Read the opencode-go Zen key from the opencodex config (no logging)."""
+    try:
+        with open(expand_path(
+                os.environ.get("VIBE_ISLAND_OPENCODEX_CONFIG", OPENCODEX_CONFIG)),
+                encoding="utf-8") as handle:
+            cfg = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    provider = (cfg.get("providers") or {}).get("opencode-go")
+    if not isinstance(provider, dict):
+        return None
+    key = str(provider.get("apiKey") or "").strip()
+    if not key:
+        pool = provider.get("apiKeyPool")
+        if isinstance(pool, list) and pool and isinstance(pool[0], dict):
+            key = str(pool[0].get("key") or "").strip()
+    return key or None
+
+
+def http_get_json(url, headers=None):
+    """GET helper (mocked in tests)."""
+    request = urllib.request.Request(url, method="GET")
+    for name, value in (headers or {}).items():
+        request.add_header(name, value)
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def opencode_snapshot_from_api(resp, now_epoch=None):
+    """Map the Zen /usage payload onto the 5h/7d/monthly snapshot."""
+    usage = (resp or {}).get("usage")
+    if not isinstance(usage, dict):
+        return None
+    now_epoch = now_epoch or int(time.time())
+    snapshot = {"provider": "OpenCode", "plan": "Go"}
+    mapping = (("rolling", "five_hour", "five_hour_reset"),
+               ("weekly", "seven_day", "seven_day_reset"),
+               ("monthly", "monthly", "monthly_reset"))
+    percents = []
+    for source, field, reset_field in mapping:
+        window = usage.get(source)
+        if not isinstance(window, dict):
+            continue
+        percent = window.get("percent")
+        if isinstance(percent, (int, float)):
+            snapshot[field] = int(round(percent))
+            reset_at = parse_iso_to_epoch(window.get("resetsAt"))
+            if reset_at:
+                snapshot[reset_field] = _format_reset_delta(reset_at, now_epoch)
+            percents.append(snapshot[field])
+    if not percents:
+        return None
+    worst = max(percents)
+    snapshot["level"] = "max" if worst >= 80 else ("high" if worst >= 50 else "low")
+    return snapshot
+
+
+def parse_iso_to_epoch(value):
+    """ISO-8601 (fractional Z) → epoch seconds, or None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return int(parsed.timestamp())
+    except ValueError:
+        return None
+
+
+def read_opencode_quota_cache():
     path = expand_path(
         os.environ.get("VIBE_ISLAND_OPENCODEX_QUOTA_CACHE", OPENCODEX_QUOTA_CACHE)
     )
@@ -788,13 +861,28 @@ def read_opencode_quota():
 
 
 def poll_opencode_go():
-    """Push the OpenCode Go plan quota, when opencodex tracks one."""
-    snapshot = read_opencode_quota()
+    """Push OpenCode Go usage: official Zen API first, cache fallback."""
+    snapshot = None
+    key = opencode_go_api_key()
+    if key:
+        url = os.environ.get("VIBE_ISLAND_OPENCODE_USAGE_URL", OPENCODE_USAGE_URL)
+        try:
+            # The gateway's WAF rejects Python's default User-Agent.
+            resp = http_get_json(url, headers={
+                "Authorization": f"Bearer {key}",
+                "User-Agent": "vibecenter/1.0"})
+            snapshot = opencode_snapshot_from_api(resp)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            log(f"opencode go: usage api unreachable ({exc.__class__.__name__})")
+        # Never log the key or the full response headers.
+    if snapshot is None:
+        snapshot = read_opencode_quota_cache()
     if snapshot is None:
         return None
     if push_usage(snapshot):
-        log(f"pushed opencode go: {snapshot.get('seven_day')}%/"
-            f"{snapshot.get('seven_day_reset', '-')} credits={snapshot.get('credits', '-')}")
+        log(f"pushed opencode go: 5h={snapshot.get('five_hour')}% "
+            f"7d={snapshot.get('seven_day')}% 月={snapshot.get('monthly')}% "
+            f"credits={snapshot.get('credits', '-')}")
         return snapshot
     return None
 
