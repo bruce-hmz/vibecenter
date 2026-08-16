@@ -344,5 +344,77 @@ class GeminiPlanTests(unittest.TestCase):
                          ("env-id", "env-secret"))
 
 
+class CodexUsageTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_usage_daemon()
+
+    def _rollout(self, tmpdir, name, mtime, rate):
+        path = pathlib.Path(tmpdir) / "sessions" / "2026" / "08" / "15" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        records = [{"type": "session_meta", "payload": {"id": name}}]
+        if rate is not None:
+            records.append({"type": "world_state",
+                            "payload": {"rate_limits": rate}})
+        else:
+            records.append({"type": "world_state",
+                            "payload": {"rate_limits": {
+                                "primary": None, "secondary": None}}})
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n",
+                        encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_falls_back_to_older_file_when_active_rollout_has_null_limits(self):
+        # Regression: the CLI leaves rate_limits null in the file it is
+        # actively writing; the real weekly value sat in a 2-day-old file
+        # that the old 24h mtime cutoff filtered out.
+        import time
+
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as tmp:
+            self._rollout(tmp, "rollout-active.jsonl", now - 60, None)
+            self._rollout(tmp, "rollout-stale.jsonl", now - 2 * 86400, {
+                "primary": {"used_percent": 3.0, "window_minutes": 10080,
+                            "resets_at": now + 3600},
+                "credits": {"unlimited": False},
+            })
+            with mock.patch.object(self.module, "CODEX_SESSIONS_DIR",
+                                   os.path.join(tmp, "sessions")):
+                usage = self.module.read_codex_usage()
+        self.assertEqual(usage["provider"], "Codex")
+        self.assertEqual(usage["seven_day"], 3)
+        self.assertEqual(usage["plan"], "Codex")
+
+    def test_prefers_record_with_future_reset_over_expired_window(self):
+        import time
+
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as tmp:
+            # Newer file carries an expired window; older file has the
+            # live one. The live one must win.
+            self._rollout(tmp, "rollout-new-expired.jsonl", now - 600, {
+                "primary": {"used_percent": 99.0, "window_minutes": 10080,
+                            "resets_at": now - 100}})
+            self._rollout(tmp, "rollout-old-live.jsonl", now - 5 * 86400, {
+                "primary": {"used_percent": 12.0, "window_minutes": 10080,
+                            "resets_at": now + 7200}})
+            with mock.patch.object(self.module, "CODEX_SESSIONS_DIR",
+                                   os.path.join(tmp, "sessions")):
+                usage = self.module.read_codex_usage()
+        self.assertEqual(usage["seven_day"], 12)
+
+    def test_skips_files_older_than_the_weekly_window(self):
+        import time
+
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as tmp:
+            self._rollout(tmp, "rollout-ancient.jsonl", now - 9 * 86400, {
+                "primary": {"used_percent": 50.0, "window_minutes": 10080,
+                            "resets_at": now + 3600}})
+            with mock.patch.object(self.module, "CODEX_SESSIONS_DIR",
+                                   os.path.join(tmp, "sessions")):
+                self.assertIsNone(self.module.read_codex_usage())
+
+
 if __name__ == "__main__":
     unittest.main()

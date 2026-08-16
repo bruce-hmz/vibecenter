@@ -450,10 +450,17 @@ def read_codex_usage():
         return None
 
     now_epoch = int(time.time())
+    # The quota itself is a rolling 7-day window (10080 minutes), and the
+    # CLI often leaves rate_limits null in the currently-active rollout —
+    # the freshest real value can easily live in a file untouched for days.
+    # So the file-mtime cutoff must match the quota window, and we prefer
+    # a record whose reset timestamp is still in the future.
+    max_file_age = 7 * 86400
+    fallback_rate = None
     best_rate = None
-    for path in candidates[:8]:
+    for path in candidates[:24]:
         try:
-            if now_epoch - os.path.getmtime(path) > 86400:
+            if now_epoch - os.path.getmtime(path) > max_file_age:
                 continue
         except OSError:
             continue
@@ -466,11 +473,16 @@ def read_codex_usage():
                         continue
                     rate = _extract_rate_limits(record)
                     if rate and rate.get("primary"):
-                        best_rate = rate
+                        reset_at = rate["primary"].get("resets_at") or 0
+                        if reset_at > now_epoch:
+                            best_rate = rate
+                        else:
+                            fallback_rate = fallback_rate or rate
         except OSError:
             continue
         if best_rate:
             break
+    best_rate = best_rate or fallback_rate
 
     if not best_rate or not best_rate.get("primary"):
         return None
