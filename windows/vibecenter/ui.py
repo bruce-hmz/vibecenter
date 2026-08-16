@@ -350,7 +350,10 @@ class NotchWindow(QWidget):
             "●" if i == self.store.usage_index else "○"
             for i in range(len(providers))
         )
-        self.usage_summary.setText(f"{usage.provider}  {usage.summary_line()}"
+        label = usage.provider
+        if usage.plan and usage.plan.lower() not in usage.provider.lower():
+            label += f" · {usage.plan}"
+        self.usage_summary.setText(f"{label}  {usage.summary_line()}"
                                    + (f"  {dots}" if len(providers) > 1 else ""))
 
     def _rebuild_request(self) -> None:

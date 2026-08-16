@@ -17,11 +17,13 @@ import json
 import hashlib
 import hmac
 import os
+import re
 import socket
 import sys
 import time
 import glob
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import datetime
@@ -45,6 +47,31 @@ CODEX_SESSIONS_DIR = os.environ.get(
     "VIBE_ISLAND_CODEX_SESSIONS_DIR",
     os.path.expanduser("~/.codex/sessions"),
 )
+
+# Google AI plan (Gemini CLI OAuth login) — same HEALTH_CHECK probe the
+# CLI's /about command uses to surface tier + Google One AI credits. The
+# OAuth client credentials are gemini-cli's own public embedded values;
+# rather than committing them (secret scanners rightly object), they are
+# discovered at runtime from the installed gemini-cli package, or supplied
+# via env vars / a config file.
+GEMINI_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+CLOUDCODE_LOAD_URL = (
+    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+)
+DEFAULT_GEMINI_CREDS_PATH = "~/.gemini/oauth_creds.json"
+G1_CREDIT_TYPE = "GOOGLE_ONE_AI"
+GEMINI_OAUTH_CONFIG = "~/.vibe-island/gemini-oauth.json"
+# Global npm-style install roots where @google/gemini-cli/bundle/*.js may
+# live (npm root -g locations across platforms).
+GEMINI_CLI_BUNDLE_DIRS = [
+    "~/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle",
+    "~/.npm-global/lib/node_modules/@google/gemini-cli/bundle",
+    "~/.local/share/../lib/node_modules/@google/gemini-cli/bundle",
+    "/usr/local/lib/node_modules/@google/gemini-cli/bundle",
+    "/usr/lib/node_modules/@google/gemini-cli/bundle",
+]
+
+_gemini_oauth_client_cache = {}
 
 # unit codes returned by the quota API (reverse-engineered from real app logs):
 #   3 → 5-hour rolling window
@@ -464,6 +491,224 @@ def read_codex_usage():
     }
 
 
+# ── Google AI plan (Gemini CLI login) ────────────────────
+# Reads ~/.gemini/oauth_creds.json (written by `gemini` on login), refreshes
+# the access token with gemini-cli's public OAuth client, then issues the
+# same loadCodeAssist HEALTH_CHECK the CLI's /about command uses. Yields the
+# plan tier and the Google One AI credit balance for paid plans.
+
+_gemini_token_cache = {"access_token": None, "expiry_date": 0}
+
+
+def gemini_creds_path():
+    return expand_path(
+        os.environ.get("VIBE_ISLAND_GEMINI_OAUTH_CREDS", DEFAULT_GEMINI_CREDS_PATH)
+    )
+
+
+def read_gemini_creds():
+    try:
+        with open(gemini_creds_path(), "r", encoding="utf-8") as handle:
+            creds = json.load(handle)
+        return creds if isinstance(creds, dict) and creds.get("refresh_token") else None
+    except (OSError, ValueError):
+        return None
+
+
+def http_post_json(url, payload, headers=None, form=False):
+    """POST helper shared by the Gemini poller (mocked in tests)."""
+    if form:
+        data = urllib.parse.urlencode(payload).encode()
+    else:
+        data = json.dumps(payload).encode()
+    request = urllib.request.Request(url, data=data, method="POST")
+    request.add_header("Content-Type",
+                       "application/x-www-form-urlencoded" if form
+                       else "application/json")
+    for key, value in (headers or {}).items():
+        request.add_header(key, value)
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def discover_gemini_oauth_client():
+    """(client_id, client_secret) for gemini-cli's public OAuth app.
+
+    Resolution order: env override → ~/.vibe-island/gemini-oauth.json →
+    scanning the installed gemini-cli bundle (the pair appears adjacent as
+    OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET string literals).
+    """
+    if _gemini_oauth_client_cache:
+        return _gemini_oauth_client_cache
+    client = {
+        "client_id": os.environ.get("VIBE_ISLAND_GEMINI_CLIENT_ID", ""),
+        "client_secret": os.environ.get("VIBE_ISLAND_GEMINI_CLIENT_SECRET", ""),
+    }
+    if not (client["client_id"] and client["client_secret"]):
+        try:
+            with open(expand_path(GEMINI_OAUTH_CONFIG), encoding="utf-8") as fh:
+                stored = json.load(fh)
+            if isinstance(stored, dict):
+                client["client_id"] = client["client_id"] or str(stored.get("client_id") or "")
+                client["client_secret"] = client["client_secret"] or str(stored.get("client_secret") or "")
+        except (OSError, ValueError):
+            pass
+    if not (client["client_id"] and client["client_secret"]):
+        pattern = re.compile(
+            r'([0-9]{8,}-[0-9a-z]{16,}\.apps\.googleusercontent\.com)'
+            r'[^0-9G]{0,40}'
+            r'(GOCSPX-[0-9A-Za-z_-]{16,})'
+        )
+        search_roots = GEMINI_CLI_BUNDLE_DIRS
+        env_roots = os.environ.get("VIBE_ISLAND_GEMINI_CLI_DIRS", "")
+        if env_roots:
+            search_roots = [part for part in env_roots.split(":") if part]
+        for root in search_roots:
+            bundle_dir = expand_path(root)
+            if not os.path.isdir(bundle_dir):
+                continue
+            for name in sorted(glob.glob(os.path.join(bundle_dir, "*.js"))):
+                try:
+                    with open(name, encoding="utf-8", errors="replace") as fh:
+                        found = pattern.search(fh.read())
+                except OSError:
+                    continue
+                if found:
+                    client = {"client_id": found.group(1),
+                              "client_secret": found.group(2)}
+                    break
+            if client["client_id"]:
+                break
+    _gemini_oauth_client_cache.update(client)
+    return _gemini_oauth_client_cache
+
+
+def refresh_gemini_token(creds):
+    """Exchange the refresh token for a fresh access token.
+
+    Writes the updated credentials back to oauth_creds.json (best effort —
+    gemini-cli itself refreshes in place, so this keeps both in sync).
+    """
+    client = discover_gemini_oauth_client()
+    if not (client.get("client_id") and client.get("client_secret")):
+        log("gemini plan: OAuth client unknown — set VIBE_ISLAND_GEMINI_"
+            "CLIENT_ID/SECRET or install gemini-cli")
+        return None
+    form = {
+        "client_id": client["client_id"],
+        "client_secret": client["client_secret"],
+        "refresh_token": creds.get("refresh_token"),
+        "grant_type": "refresh_token",
+    }
+    token_resp = http_post_json(GEMINI_OAUTH_TOKEN_URL, form, form=True)
+    access_token = token_resp.get("access_token")
+    if not access_token:
+        return None
+    creds = dict(creds)
+    creds["access_token"] = access_token
+    creds["expiry_date"] = token_resp.get("expires_in", 3600) * 1000 + int(
+        time.time() * 1000
+    )
+    try:
+        with open(gemini_creds_path(), "w", encoding="utf-8") as handle:
+            json.dump(creds, handle, indent=2)
+    except OSError:
+        pass
+    return access_token
+
+
+def gemini_access_token():
+    """Cached access token, refreshed when missing or about to expire."""
+    now_ms = int(time.time() * 1000)
+    cached = _gemini_token_cache
+    if cached["access_token"] and cached["expiry_date"] > now_ms + 60_000:
+        return cached["access_token"]
+    creds = read_gemini_creds()
+    if not creds:
+        return None
+    if creds.get("access_token") and creds.get("expiry_date", 0) > now_ms + 60_000:
+        cached["access_token"] = creds["access_token"]
+        cached["expiry_date"] = creds["expiry_date"]
+        return cached["access_token"]
+    token = refresh_gemini_token(creds)
+    if token:
+        cached["access_token"] = token
+        cached["expiry_date"] = now_ms + 3_600_000
+    return token
+
+
+def cloudcode_health_check(access_token):
+    """loadCodeAssist in HEALTH_CHECK mode — tier + credit wallet."""
+    payload = {
+        "metadata": {
+            "ideType": "IDE_UNSPECIFIED",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        },
+        "mode": "HEALTH_CHECK",
+    }
+    try:
+        return http_post_json(
+            CLOUDCODE_LOAD_URL, payload,
+            headers={"Authorization": f"Bearer {access_token}"})
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+GEMINI_PLAN_LABELS = {
+    "free-tier": "Gemini Free",
+    "standard-tier": "Google AI Pro",
+    "legacy-paid-tier": "Google AI Ultra",
+}
+
+
+def gemini_snapshot_from_response(resp):
+    """Build a usage snapshot from the loadCodeAssist response."""
+    tier = resp.get("currentTier") or {}
+    tier_id = str(tier.get("id") or "")
+    snapshot = {
+        "provider": "Gemini",
+        "plan": GEMINI_PLAN_LABELS.get(tier_id, tier_id or "Gemini"),
+        "level": tier_id,
+    }
+    credits_total = 0
+    saw_credits = False
+    paid = resp.get("paidTier") or {}
+    for credit in paid.get("availableCredits") or []:
+        if not isinstance(credit, dict):
+            continue
+        if str(credit.get("creditType") or "") != G1_CREDIT_TYPE:
+            continue
+        saw_credits = True
+        try:
+            credits_total += int(float(str(credit.get("creditAmount") or 0)))
+        except (TypeError, ValueError):
+            continue
+    if saw_credits:
+        snapshot["credits"] = f"{credits_total:,}"
+    return snapshot
+
+
+def poll_gemini_plan():
+    """Poll the Google AI plan and push a signed usage snapshot."""
+    if read_gemini_creds() is None:
+        return None  # gemini CLI never logged in on this machine
+    token = gemini_access_token()
+    if not token:
+        log("gemini plan: token refresh failed")
+        return None
+    resp = cloudcode_health_check(token)
+    if not resp:
+        log("gemini plan: loadCodeAssist failed")
+        return None
+    snapshot = gemini_snapshot_from_response(resp)
+    if push_usage(snapshot):
+        log(f"pushed Gemini plan: {snapshot.get('plan')} "
+            f"credits={snapshot.get('credits', '-')}")
+        return snapshot
+    return None
+
+
 def poll_codex_usage():
     """Read Codex usage from local rollout files and push to the app."""
     usage = read_codex_usage()
@@ -667,6 +912,9 @@ def main():
 
             # Codex usage from local rollout files (no API key needed).
             poll_codex_usage()
+
+            # Google AI plan (Gemini CLI login): tier + Google One AI credits.
+            poll_gemini_plan()
 
             # Discover and poll every enabled provider in ZCode config.
             # Covers BigModel, Z.ai, and any OpenAI-compatible token plan.

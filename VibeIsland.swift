@@ -1745,7 +1745,8 @@ class LocalServer {
                     monthly:  u["monthly"] as? Int,
                     monthlyReset: u["monthly_reset"] as? String,
                     level:    u["level"] as? String,
-                    plan:     u["plan"] as? String
+                    plan:     u["plan"] as? String,
+                    credits:  u["credits"] as? String
                 )
                 DispatchQueue.main.async {
                     self.viewModel.upsertProvider(snap)
@@ -2262,6 +2263,9 @@ struct UsageSnapshot: Identifiable, Equatable {
     let monthlyReset: String?
     let level: String?
     let plan: String?
+    // Remaining plan credits ("1,240") for wallet-style providers like the
+    // Google One AI credits on a Gemini paid plan. nil when not applicable.
+    let credits: String?
 
     // Color by usage level: green < 50%, yellow < 80%, red otherwise.
     func color(for window: Window) -> Color {
@@ -2844,21 +2848,38 @@ struct UsageRotator: View {
 
                     if let usage = vm.currentUsage {
                         HStack(spacing: 8) {
-                            windowBar(label: "5h",
-                                      pct: usage.fiveHour,
-                                      reset: usage.fiveHourReset,
-                                      color: usage.color(for: .fiveHour))
-                            Divider().frame(height: 26).overlay(Theme.divider)
-                            windowBar(label: "7d",
-                                      pct: usage.sevenDay,
-                                      reset: usage.sevenDayReset,
-                                      color: usage.color(for: .sevenDay))
-                            if let mo = usage.monthly {
+                            if let credits = usage.credits {
+                                // Wallet-style provider (Google One AI credits):
+                                // show the remaining balance instead of % bars.
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(usage.plan?.uppercased() ?? "PLAN")
+                                        .font(NotchFont.mono(8))
+                                        .foregroundColor(Theme.textMuted)
+                                    Text(credits)
+                                        .font(NotchFont.mono(12))
+                                        .foregroundColor(Theme.green)
+                                    Text("积分剩余")
+                                        .font(NotchFont.mono(8))
+                                        .foregroundColor(Theme.textMuted)
+                                }
+                                .frame(width: 74, alignment: .leading)
+                            } else {
+                                windowBar(label: "5h",
+                                          pct: usage.fiveHour,
+                                          reset: usage.fiveHourReset,
+                                          color: usage.color(for: .fiveHour))
                                 Divider().frame(height: 26).overlay(Theme.divider)
-                                windowBar(label: "mo",
-                                          pct: mo,
-                                          reset: usage.monthlyReset,
-                                          color: usage.color(for: .monthly))
+                                windowBar(label: "7d",
+                                          pct: usage.sevenDay,
+                                          reset: usage.sevenDayReset,
+                                          color: usage.color(for: .sevenDay))
+                                if let mo = usage.monthly {
+                                    Divider().frame(height: 26).overlay(Theme.divider)
+                                    windowBar(label: "mo",
+                                              pct: mo,
+                                              reset: usage.monthlyReset,
+                                              color: usage.color(for: .monthly))
+                                }
                             }
                         }
                     }

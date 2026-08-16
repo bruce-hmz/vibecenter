@@ -367,6 +367,7 @@ class UsageSnapshot:
     monthly_reset: str = ""
     level: str = ""
     plan: str = ""
+    credits: str = ""  # remaining plan credits, e.g. "1,240" (Google One AI)
 
     @staticmethod
     def from_payload(provider: str, usage: Dict[str, Any]) -> "UsageSnapshot":
@@ -386,9 +387,12 @@ class UsageSnapshot:
             monthly_reset=str(usage.get("monthly_reset") or ""),
             level=str(usage.get("level") or ""),
             plan=str(usage.get("plan") or ""),
+            credits=str(usage.get("credits") or ""),
         )
 
     def summary_line(self) -> str:
+        if self.credits:
+            return f"剩 {self.credits} 积分"
         parts = []
         if self.five_hour is not None:
             parts.append(f"5h {self.five_hour}" + (f"（{self.five_hour_reset}）" if self.five_hour_reset else ""))

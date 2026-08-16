@@ -226,5 +226,123 @@ class UsageDaemonTests(unittest.TestCase):
         push_status.assert_called_once_with("already_running")
 
 
+class GeminiPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_usage_daemon()
+        self.module._gemini_token_cache.update({"access_token": None, "expiry_date": 0})
+
+    def test_snapshot_maps_paid_tier_and_sums_g1_credits(self):
+        resp = {
+            "currentTier": {"id": "standard-tier"},
+            "paidTier": {"availableCredits": [
+                {"creditType": "GOOGLE_ONE_AI", "creditAmount": "1000"},
+                {"creditType": "OTHER", "creditAmount": "42"},
+                {"creditType": "GOOGLE_ONE_AI", "creditAmount": "240.5"},
+            ]},
+        }
+        snapshot = self.module.gemini_snapshot_from_response(resp)
+        self.assertEqual(snapshot["provider"], "Gemini")
+        self.assertEqual(snapshot["plan"], "Google AI Pro")
+        self.assertEqual(snapshot["level"], "standard-tier")
+        self.assertEqual(snapshot["credits"], "1,240")
+
+    def test_snapshot_free_tier_has_no_credits(self):
+        resp = {"currentTier": {"id": "free-tier"}}
+        snapshot = self.module.gemini_snapshot_from_response(resp)
+        self.assertEqual(snapshot["plan"], "Gemini Free")
+        self.assertNotIn("credits", snapshot)
+
+    def test_poll_skips_when_never_logged_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ,
+                                 {"VIBE_ISLAND_GEMINI_OAUTH_CREDS":
+                                  os.path.join(tmp, "none.json")}):
+                self.assertIsNone(self.module.poll_gemini_plan())
+
+    def test_poll_pushes_signed_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            creds_path = os.path.join(tmp, "oauth_creds.json")
+            pathlib.Path(creds_path).write_text(json.dumps({
+                "access_token": "tok", "expiry_date": 9_999_999_999_999,
+                "refresh_token": "r"}), encoding="utf-8")
+            with mock.patch.dict(os.environ,
+                                 {"VIBE_ISLAND_GEMINI_OAUTH_CREDS": creds_path}):
+                with mock.patch.object(
+                        self.module, "cloudcode_health_check",
+                        return_value={"currentTier": {"id": "legacy-paid-tier"},
+                                      "paidTier": {"availableCredits": [
+                                          {"creditType": "GOOGLE_ONE_AI",
+                                           "creditAmount": "1500"}]}}) as check:
+                    with mock.patch.object(self.module, "push_usage",
+                                           return_value=True) as push:
+                        snapshot = self.module.poll_gemini_plan()
+                check.assert_called_once_with("tok")
+        self.assertEqual(snapshot["plan"], "Google AI Ultra")
+        self.assertEqual(snapshot["credits"], "1,500")
+        pushed = push.call_args[0][0]
+        self.assertEqual(pushed["provider"], "Gemini")
+
+    def test_refresh_writes_back_updated_creds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            creds_path = os.path.join(tmp, "oauth_creds.json")
+            pathlib.Path(creds_path).write_text(json.dumps({
+                "refresh_token": "r-old"}), encoding="utf-8")
+            env = {"VIBE_ISLAND_GEMINI_OAUTH_CREDS": creds_path,
+                   "VIBE_ISLAND_GEMINI_CLIENT_ID": "test-client",
+                   "VIBE_ISLAND_GEMINI_CLIENT_SECRET": "test-secret"}
+            with mock.patch.dict(os.environ, env):
+                self.module._gemini_oauth_client_cache.clear()
+                with mock.patch.object(
+                        self.module, "http_post_json",
+                        return_value={"access_token": "fresh",
+                                      "expires_in": 3600}):
+                    token = self.module.refresh_gemini_token(
+                        {"refresh_token": "r-old"})
+            self.assertEqual(token, "fresh")
+            stored = json.loads(pathlib.Path(creds_path).read_text())
+            self.assertEqual(stored["access_token"], "fresh")
+            self.assertGreater(stored["expiry_date"], 0)
+
+    def test_oauth_client_discovered_from_gemini_cli_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = pathlib.Path(tmp) / "bundle"
+            bundle.mkdir()
+            (bundle / "chunk-TEST.js").write_text(
+                'var OAUTH_CLIENT_ID = '
+                '"1234567890-abcdefabcdefabcdefabcdef'
+                '.apps.googleusercontent.com";\n'
+                'var OAUTH_CLIENT_SECRET = "GOCSPX-testsecret1234567890";\n',
+                encoding="utf-8")
+            # Adjacent-but-wrong pair (gcloud SDK client, no local secret)
+            (bundle / "chunk-OTHER.js").write_text(
+                'exports2.CLOUD_SDK_CLIENT_ID = "764086051850-6qr4p6gpi6hn5"'
+                '06pt8ejuq83di341hur.apps.googleusercontent.com";',
+                encoding="utf-8")
+            with mock.patch.dict(
+                    os.environ,
+                    {"VIBE_ISLAND_GEMINI_CLI_DIRS": str(bundle),
+                     "VIBE_ISLAND_GEMINI_CLIENT_ID": "",
+                     "VIBE_ISLAND_GEMINI_CLIENT_SECRET": ""}):
+                with mock.patch.object(self.module, "GEMINI_OAUTH_CONFIG",
+                                       os.path.join(tmp, "no-oauth.json")):
+                    self.module._gemini_oauth_client_cache.clear()
+                    client = self.module.discover_gemini_oauth_client()
+        self.assertEqual(client["client_id"],
+                         "1234567890-abcdefabcdefabcdefabcdef"
+                         ".apps.googleusercontent.com")
+        self.assertEqual(client["client_secret"],
+                         "GOCSPX-testsecret1234567890")
+
+    def test_oauth_client_env_override_wins(self):
+        with mock.patch.dict(
+                os.environ,
+                {"VIBE_ISLAND_GEMINI_CLIENT_ID": "env-id",
+                 "VIBE_ISLAND_GEMINI_CLIENT_SECRET": "env-secret"}):
+            self.module._gemini_oauth_client_cache.clear()
+            client = self.module.discover_gemini_oauth_client()
+        self.assertEqual((client["client_id"], client["client_secret"]),
+                         ("env-id", "env-secret"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -381,6 +381,8 @@ def self_test() -> int:
                       seven_day=41, monthly=214, level="plus", plan="Max"),
         UsageSnapshot(provider="Codex", five_hour=2, five_hour_reset="1h12m",
                       monthly=88, plan="Pro"),
+        UsageSnapshot(provider="Gemini", plan="Google AI Pro",
+                      level="standard-tier", credits="1,240"),
     ]
     store.sessionsChanged.emit()
     store.usageChanged.emit()

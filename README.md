@@ -15,7 +15,9 @@ quotas, and approval prompts for write operations.
 - **Multi-agent session list** — scans running agent sessions (see below)
 - **Real-time activity** — FileWatcher on rollout/transcript files (zero-delay)
 - **Compact mode** — provider, current activity, pulse animation, and `+N` overflow
-- **Usage monitoring** — Z.ai 5h/7d/monthly quotas with reset times + provider logo
+- **Usage monitoring** — Z.ai 5h/7d/monthly quotas, Codex local rollouts,
+  and the Google AI plan (Gemini CLI login): tier + Google One AI credit
+  balance, with reset times + provider logo
 - **Approval inbox** — queued write approvals and multi-question AskUserQuestion UI
 - **Explainable approval risk** — low/medium/high/critical signals with human-readable reasons
 - **Safe batch approval** — high and critical requests always require an individual decision
@@ -98,8 +100,18 @@ polling itself. For manual debugging, the daemon still works standalone:
 ```bash
 python3 usage-daemon.py &
 ```
-(Reads a Z.ai API key from `~/.zcode/v2/config.json`; poll interval/config path
-can be overridden with `VIBE_ISLAND_USAGE_*` env vars for testing.)
+Polled providers (pushed into the rotating usage strip):
+- **Z.ai / 智谱 GLM** — API key from `~/.zcode/v2/config.json` (5h/7d/月 quotas)
+- **Codex** — local rollout files, no key needed
+- **Google AI plan** — reads `~/.gemini/oauth_creds.json` (the `gemini`
+  CLI's login), refreshes the token with gemini-cli's public OAuth client,
+  and issues the same `loadCodeAssist` HEALTH_CHECK the CLI's `/about`
+  uses: plan tier (Free / AI Pro / AI Ultra) + Google One AI credit
+  balance for paid plans
+- any other OpenAI-compatible provider configured in ZCode
+
+Poll interval/config paths can be overridden with `VIBE_ISLAND_*` env
+vars (e.g. `VIBE_ISLAND_GEMINI_OAUTH_CREDS`) for testing.
 
 ## Architecture
 
