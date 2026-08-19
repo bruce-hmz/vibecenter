@@ -47,6 +47,7 @@ class ScanConfig:
     kimi_sessions_dirs: Optional[List[str]] = None
     opencode_storage_dirs: Optional[List[str]] = None
     deepseek_sessions_dir: Optional[str] = None
+    workbuddy_db: Optional[str] = None
     active_window: int = ACTIVE_WINDOW_SECS
     zcode_app_running: Optional[bool] = None
     # Optional test injection: {pid: (cwd, command, start_epoch)}.
@@ -97,6 +98,8 @@ class ScanConfig:
             opencode_storage_dirs=opt_list("VIBE_ISLAND_OPENCODE_STORAGE_DIRS") or opencode_list,
             deepseek_sessions_dir=opt("VIBE_ISLAND_DEEPSEEK_SESSIONS_DIR",
                                       os.path.join(home, ".deepseek", "sessions")),
+            workbuddy_db=opt("VIBE_ISLAND_WORKBUDDY_DB",
+                             os.path.join(home, ".workbuddy", "workbuddy.db")),
             active_window=window,
             zcode_app_running=(zcode_running_raw in ("1", "true", "yes")) if zcode_running_raw else None,
         )
@@ -736,6 +739,41 @@ def scan_opencode(config: ScanConfig) -> List[AgentSession]:
     return sessions
 
 
+# ── WorkBuddy ────────────────────────────────────────────
+# WorkBuddy (Electron app) tracks sessions in ~/.workbuddy/workbuddy.db
+# (SQLite): sessions(id, custom_title/title, status, cwd, updated_at ms).
+
+def scan_workbuddy(config: ScanConfig) -> List[AgentSession]:
+    if not source_enabled(config, "workbuddy"):
+        return []
+    db = config.workbuddy_db or ""
+    if not db or not os.path.isfile(db):
+        return []
+    now = now_of(config)
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT id, coalesce(nullif(custom_title, ''), title), status, cwd, updated_at "
+            "FROM sessions WHERE deleted_at IS NULL AND updated_at > ? "
+            "ORDER BY updated_at DESC LIMIT 5",
+            ((now - config.active_window) * 1000,)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    sessions: List[AgentSession] = []
+    for sid, title, status, cwd, updated_ms in rows:
+        updated = updated_ms / 1000.0
+        running = status == "working" and (now - updated) < RUNNING_SECS
+        sessions.append(AgentSession(
+            id=str(sid), source="workbuddy",
+            task=(str(title or "WorkBuddy").replace("\t", " ").replace("\n", " ").strip())[:60],
+            preview="", detail=_short_name(str(cwd or "")), cwd=str(cwd or ""),
+            transcript_path=db, terminal="workbuddy",
+            last_ts="", last_update=updated, running=running,
+        ))
+    return sessions
+
+
 # ── DeepSeek ────────────────────────────────────────────
 
 def scan_deepseek(config: ScanConfig) -> List[AgentSession]:
@@ -773,7 +811,7 @@ def scan_deepseek(config: ScanConfig) -> List[AgentSession]:
 
 SCANNERS = [
     scan_claude, scan_zcode, scan_codex, scan_antigravity, scan_gemini_cli,
-    scan_qwen, scan_kimi, scan_opencode, scan_deepseek,
+    scan_qwen, scan_kimi, scan_opencode, scan_workbuddy, scan_deepseek,
 ]
 
 

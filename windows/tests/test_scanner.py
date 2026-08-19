@@ -234,6 +234,38 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(scan_all(config), [])
 
 
+    def test_workbuddy_working_session_from_sqlite(self) -> None:
+        import sqlite3
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            now = int(time.time())
+            db = os.path.join(tmp, "workbuddy.db")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT, title TEXT, custom_title TEXT, "
+                "status TEXT, cwd TEXT, created_at INTEGER, updated_at INTEGER, "
+                "deleted_at INTEGER)")
+            conn.execute(
+                "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+                ("wb-1", None, "迁移技能", "working", "/tmp/p",
+                 now * 1000 - 5000, now * 1000 - 2000, None))
+            conn.execute(
+                "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+                ("wb-old", "旧", None, "completed", "/tmp/x",
+                 now * 1000 - 900000, now * 1000 - 900000, None))
+            conn.commit()
+            conn.close()
+            config = make_config(tmp, now, workbuddy_db=db)
+
+            sessions = scan_all(config)
+
+            self.assertEqual([s.id for s in sessions], ["wb-1"])
+            self.assertEqual(sessions[0].source, "workbuddy")
+            self.assertEqual(sessions[0].task, "迁移技能")
+            self.assertTrue(sessions[0].running)
+
+
 class RiskTests(unittest.TestCase):
     def _request(self, **kwargs) -> PendingRequest:
         defaults = dict(id="r", kind="approval", tool_name="Bash", command="",

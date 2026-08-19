@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 
 
@@ -729,6 +730,49 @@ class ScanAgentsTests(unittest.TestCase):
             )
 
             self.assertEqual([s["session_id"] for s in sessions], ["ses_top"])
+
+
+    def test_workbuddy_emits_working_session_from_sqlite(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = int(time.time())
+            db = tmpdir / "workbuddy.db"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT, title TEXT, custom_title TEXT, "
+                "status TEXT, cwd TEXT, created_at INTEGER, updated_at INTEGER, "
+                "deleted_at INTEGER)")
+            conn.execute(
+                "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+                ("wb-1", None, "迁移 codex 游戏词技能", "working",
+                 "/Users/bruce/WorkBuddy/proj", now_epoch * 1000 - 5000,
+                 now_epoch * 1000 - 2000, None))
+            conn.execute(
+                "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+                ("wb-old", "旧会话", None, "completed", "/tmp/x",
+                 now_epoch * 1000 - 900000, now_epoch * 1000 - 900000, None))
+            conn.commit()
+            conn.close()
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "workbuddy",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_WORKBUDDY_DB": str(db),
+                    "VIBE_ISLAND_WORKBUDDY_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertEqual(session["source"], "workbuddy")
+            self.assertEqual(session["session_id"], "wb-1")
+            self.assertEqual(session["task"], "迁移 codex 游戏词技能")
+            self.assertEqual(session["cwd"], "/Users/bruce/WorkBuddy/proj")
+            self.assertEqual(session["terminal"], "workbuddy")
+            self.assertTrue(session["running"])
 
 
 if __name__ == "__main__":

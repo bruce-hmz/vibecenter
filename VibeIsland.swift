@@ -229,6 +229,7 @@ enum JumpToApp {
         case "terminal", "terminal.app", "apple_terminal": return "Terminal"
         case "ghostty", "ghostty.app": return "Ghostty"
         case "zcode", "zcode.app": return "/Applications/ZCode.app"
+        case "workbuddy", "workbuddy.app": return "WorkBuddy"
         case "vscode", "code", "visual studio code": return "Visual Studio Code"
         case "cursor", "cursor.app": return "Cursor"
         case "chatgpt", "codex": return "ChatGPT"
@@ -237,6 +238,7 @@ enum JumpToApp {
         switch source.lowercased() {
         case "codex": return "ChatGPT"
         case "zcode": return "/Applications/ZCode.app"
+        case "workbuddy": return "WorkBuddy"
         default: return nil
         }
     }
@@ -364,6 +366,7 @@ struct AgentSession: Identifiable {
         case "grok":     return Color(red: 255/255, green: 255/255, blue: 255/255)  // white
         case "qwen":     return Color(red: 122/255, green: 110/255, blue: 245/255)  // indigo (Qwen Code)
         case "opencode": return Color(red: 245/255, green: 158/255, blue: 11/255)   // amber (OpenCode)
+        case "workbuddy": return Color(red: 16/255, green: 185/255, blue: 129/255)  // emerald (WorkBuddy)
         default:         return Color(red: 156/255, green: 163/255, blue: 175/255)
         }
     }

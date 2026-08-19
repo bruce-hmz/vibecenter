@@ -24,6 +24,7 @@ SOURCE_COLORS = {
     "grok": "#FFFFFF",       # white
     "qwen": "#7A6EF5",       # indigo
     "opencode": "#F59E0B",   # amber
+    "workbuddy": "#10B981",  # emerald
 }
 
 RISK_COLORS = {

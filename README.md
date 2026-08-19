@@ -43,6 +43,7 @@ quotas, and approval prompts for write operations.
 | Qwen Code | `qwen` | `~/.qwen/tmp/<slug>/chats/session-*.jsonl` (same layout as Gemini CLI) |
 | Kimi CLI | `kimi` | `~/.kimi/sessions/**/wire.jsonl` / `~/.kimi-code/sessions/**/wire.jsonl` |
 | OpenCode | `opencode` | `~/.local/share/opencode/storage/{session,message,message_part}/` |
+| WorkBuddy | `workbuddy` | `~/.workbuddy/workbuddy.db` (SQLite sessions table, read-only) |
 | DeepSeek | `deepseek` | `~/.deepseek/sessions/*.json` |
 
 Every source can be toggled with `VIBE_ISLAND_ONLY_SOURCES` and its scan

@@ -909,6 +909,48 @@ if source_enabled "gemini"; then
   fi
 fi
 
+# ── WorkBuddy ────────────────────────────────────────────
+# WorkBuddy (Electron app) tracks sessions in ~/.workbuddy/workbuddy.db
+# (SQLite): sessions(id, custom_title/title, status, cwd, updated_at ms).
+# "working" + a fresh updated_at means the agent is actively running.
+workbuddy_db="${VIBE_ISLAND_WORKBUDDY_DB:-$HOME/.workbuddy/workbuddy.db}"
+workbuddy_window="${VIBE_ISLAND_WORKBUDDY_ACTIVE_WINDOW_SECS:-300}"
+if source_enabled "workbuddy" && [ -f "$workbuddy_db" ]; then
+  workbuddy_rows=$(python3 - "$workbuddy_db" "$workbuddy_window" "$(epoch_now)" <<'PY' 2>/dev/null
+import datetime as dt
+import sqlite3
+import sys
+
+db, window, now = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    rows = conn.execute(
+        "SELECT id, coalesce(nullif(custom_title, ''), title), status, cwd, updated_at "
+        "FROM sessions WHERE deleted_at IS NULL AND updated_at > ? "
+        "ORDER BY updated_at DESC LIMIT 5",
+        ((now - window) * 1000,)).fetchall()
+    conn.close()
+except sqlite3.Error:
+    sys.exit(0)
+for sid, title, status, cwd, updated_ms in rows:
+    running = status == "working" and (now * 1000 - updated_ms) < 15000
+    clean = lambda s: (s or "").replace("\t", " ").replace("\n", " ").strip()
+    ts = dt.datetime.fromtimestamp(updated_ms / 1000, dt.timezone.utc).isoformat()
+    print(f"{sid}\t{clean(title) or 'WorkBuddy'}\t"
+          f"{'true' if running else 'false'}\t{clean(cwd)}\t{ts}")
+PY
+)
+  for wrow in ${(f)workbuddy_rows}; do
+    [ -z "$wrow" ] && continue
+    w_id=$(echo "$wrow" | cut -f1)
+    w_title=$(echo "$wrow" | cut -f2)
+    w_running=$(echo "$wrow" | cut -f3)
+    w_cwd=$(echo "$wrow" | cut -f4)
+    w_ts=$(echo "$wrow" | cut -f5)
+    emit "$w_id" "workbuddy" "$w_title" "$(short_cwd "$w_cwd")" "" "workbuddy" "$w_ts" "$w_running" "$(short_cwd "$w_cwd")" "$w_cwd" "$workbuddy_db" "recent_session" ""
+  done
+fi
+
 # ── DeepSeek ────────────────────────────────────────────
 # DeepSeek stores sessions as ~/.deepseek/sessions/<id>.json
 # Each is {messages:[{role,content}], metadata:{...}, system_prompt:"..."}
