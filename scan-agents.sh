@@ -447,8 +447,13 @@ PY
   print -r -- "${title:-ZCode}	${preview}	${last_ts}"
 }
 
-# Only emit zcode sessions if ZCode.app is actually running.
-# Enumerate ALL active sessions (exclude subagent sessions).
+# Only emit zcode sessions when one is actually active. We deliberately
+# do NOT gate on the ZCode.app process: background agent runtimes
+# (zcode-node-repl-mcp) keep sessions working after the app window and
+# even the main process are gone, while orphaned helpers/crashpad keep
+# "ZCode.app" strings in the process table long after a real quit. The
+# 5-minute rollout-activity window below is the honest signal (same rule
+# codex uses). VIBE_ISLAND_ZCODE_APP_RUNNING remains as a test override.
 zcode_rollout_dir="${VIBE_ISLAND_ZCODE_ROLLOUT_DIR:-$HOME/.zcode/cli/rollout}"
 zcode_active_window_secs="${VIBE_ISLAND_ZCODE_ACTIVE_WINDOW_SECS:-300}"
 zcode_app_running_override="${VIBE_ISLAND_ZCODE_APP_RUNNING:-}"
@@ -457,10 +462,8 @@ if [ -n "$zcode_app_running_override" ]; then
     1|true|yes) zcode_app_running=true ;;
     *) zcode_app_running=false ;;
   esac
-elif pgrep -f "ZCode.app" >/dev/null 2>&1; then
-  zcode_app_running=true
 else
-  zcode_app_running=false
+  zcode_app_running=true
 fi
 
 if source_enabled "zcode" && [ "$zcode_app_running" = "true" ]; then

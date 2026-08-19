@@ -487,7 +487,9 @@ class ScanAgentsTests(unittest.TestCase):
                 {
                     "VIBE_ISLAND_ONLY_SOURCES": "zcode",
                     "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
-                    "VIBE_ISLAND_ZCODE_APP_RUNNING": "true",
+                    # No app-running override: background agent runtimes
+                    # keep sessions alive after the app process is gone, so
+                    # a fresh rollout must surface without any process check.
                     "VIBE_ISLAND_ZCODE_ROLLOUT_DIR": str(rollout_dir),
                     "VIBE_ISLAND_ZCODE_ACTIVE_WINDOW_SECS": "300",
                 }
@@ -498,6 +500,26 @@ class ScanAgentsTests(unittest.TestCase):
             self.assertEqual(session["source"], "zcode")
             self.assertEqual(session["task"], "修复登录页面的样式 bug")
             self.assertEqual(session["preview"], "开始分析")
+
+    def test_zcode_override_false_skips_even_with_fresh_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = pathlib.Path(tmp)
+            now_epoch = 1_800_000_000
+            rollout_dir = tmpdir / "zcode-rollout"
+            rollout = rollout_dir / "model-io-sess_off.jsonl"
+            write_text(rollout, '{"response":{"text":"x"}}\n')
+            set_mtime(rollout, now_epoch - 5)
+
+            sessions = self.run_scan(
+                {
+                    "VIBE_ISLAND_ONLY_SOURCES": "zcode",
+                    "VIBE_ISLAND_NOW_EPOCH": str(now_epoch),
+                    "VIBE_ISLAND_ZCODE_APP_RUNNING": "false",
+                    "VIBE_ISLAND_ZCODE_ROLLOUT_DIR": str(rollout_dir),
+                    "VIBE_ISLAND_ZCODE_ACTIVE_WINDOW_SECS": "300",
+                }
+            )
+            self.assertEqual(sessions, [])
 
     def test_gemini_cli_emits_recent_chat_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

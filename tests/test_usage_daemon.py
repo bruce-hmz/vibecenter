@@ -430,13 +430,12 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
         import time
 
         now = int(time.time())
+        future = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                            time.gmtime(now + secs))
         resp = {"usage": {
-            "rolling": {"status": "ok", "percent": 5,
-                        "resetsAt": "2026-08-16T14:44:19.443Z"},
-            "weekly": {"status": "ok", "percent": 2,
-                       "resetsAt": "2026-08-17T00:00:00.443Z"},
-            "monthly": {"status": "ok", "percent": 1,
-                        "resetsAt": "2026-09-16T02:50:10.443Z"},
+            "rolling": {"status": "ok", "percent": 5, "resetsAt": future(3600)},
+            "weekly": {"status": "ok", "percent": 2, "resetsAt": future(86400)},
+            "monthly": {"status": "ok", "percent": 1, "resetsAt": future(30 * 86400)},
         }}
         snapshot = self.module.opencode_snapshot_from_api(resp, now_epoch=now)
         self.assertEqual(snapshot["provider"], "OpenCode")
@@ -448,9 +447,13 @@ class OpenCodeGoQuotaTests(unittest.TestCase):
         self.assertTrue(snapshot["five_hour_reset"])
 
     def test_api_snapshot_level_takes_worst_window(self):
+        import time
+
+        future = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                            time.gmtime(time.time() + secs))
         resp = {"usage": {
-            "rolling": {"percent": 85, "resetsAt": "2026-08-16T14:44:19Z"},
-            "weekly": {"percent": 2, "resetsAt": "2026-08-17T00:00:00Z"},
+            "rolling": {"percent": 85, "resetsAt": future(3600)},
+            "weekly": {"percent": 2, "resetsAt": future(86400)},
         }}
         snapshot = self.module.opencode_snapshot_from_api(resp)
         self.assertEqual(snapshot["level"], "max")
