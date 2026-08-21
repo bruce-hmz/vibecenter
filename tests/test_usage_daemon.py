@@ -347,6 +347,13 @@ class GeminiPlanTests(unittest.TestCase):
 class CodexUsageTests(unittest.TestCase):
     def setUp(self):
         self.module = load_usage_daemon()
+        # Isolate from this machine's real opencodex cache so rollout
+        # parsing is what's under test; cache-preference tests point the
+        # env at explicit fixtures below.
+        patcher = mock.patch.dict(
+            os.environ, {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": "/nonexistent"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _rollout(self, tmpdir, name, mtime, rate):
         path = pathlib.Path(tmpdir) / "sessions" / "2026" / "08" / "15" / name
@@ -414,6 +421,51 @@ class CodexUsageTests(unittest.TestCase):
             with mock.patch.object(self.module, "CODEX_SESSIONS_DIR",
                                    os.path.join(tmp, "sessions")):
                 self.assertIsNone(self.module.read_codex_usage())
+
+    def test_fresh_opencodex_cache_beats_rollout_snapshots(self):
+        import time
+
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as tmp:
+            # Rollout says 3% …
+            self._rollout(tmp, "rollout-live.jsonl", now - 60, {
+                "primary": {"used_percent": 3.0, "window_minutes": 10080,
+                            "resets_at": now + 3600}})
+            # … but the opencodex service refreshed the quota a minute ago
+            # saying 55%. The cache must win.
+            cache = pathlib.Path(tmp) / "codex-quota-cache.json"
+            cache.write_text(json.dumps({"version": 1, "quotas": {
+                "__main__": {"updatedAt": int(time.time() * 1000) - 60_000,
+                             "weeklyPercent": 55,
+                             "weeklyResetAt": now + 7200}}}), encoding="utf-8")
+            with mock.patch.dict(os.environ,
+                                 {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": str(cache)}):
+                with mock.patch.object(self.module, "CODEX_SESSIONS_DIR",
+                                       os.path.join(tmp, "sessions")):
+                    usage = self.module.read_codex_usage()
+        self.assertEqual(usage["seven_day"], 55)
+        self.assertEqual(usage["provider"], "Codex")
+        self.assertEqual(usage["level"], "high")
+
+    def test_stale_opencodex_cache_falls_back_to_rollouts(self):
+        import time
+
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as tmp:
+            self._rollout(tmp, "rollout-live.jsonl", now - 60, {
+                "primary": {"used_percent": 3.0, "window_minutes": 10080,
+                            "resets_at": now + 3600}})
+            cache = pathlib.Path(tmp) / "codex-quota-cache.json"
+            cache.write_text(json.dumps({"version": 1, "quotas": {
+                "__main__": {"updatedAt": int(time.time() * 1000) - 30 * 60_000,
+                             "weeklyPercent": 55,
+                             "weeklyResetAt": now + 7200}}}), encoding="utf-8")
+            with mock.patch.dict(os.environ,
+                                 {"VIBE_ISLAND_OPENCODEX_QUOTA_CACHE": str(cache)}):
+                with mock.patch.object(self.module, "CODEX_SESSIONS_DIR",
+                                       os.path.join(tmp, "sessions")):
+                    usage = self.module.read_codex_usage()
+        self.assertEqual(usage["seven_day"], 3)
 
 
 class OpenCodeGoQuotaTests(unittest.TestCase):

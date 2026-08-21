@@ -36,7 +36,10 @@ except ImportError:  # Windows — use the CRT byte-range lock instead.
     import msvcrt
 
 HOST, PORT = "127.0.0.1", 14321
-DEFAULT_POLL_INTERVAL = 120.0
+# API-backed providers (Z.ai, Gemini, OpenCode) are cheap to poll, and the
+# panel should track quota moves without a visible lag. 30s keeps request
+# volume trivial (~3k/day) while feeling near-real-time.
+DEFAULT_POLL_INTERVAL = 30.0
 DEFAULT_ZCODE_CONFIG = "~/.zcode/v2/config.json"
 DEFAULT_LOCK_PATH = "~/.vibe-island/run/usage-daemon.lock"
 DEFAULT_IPC_TOKEN_FILE = "~/.vibe-island/run/ipc-token"
@@ -432,13 +435,27 @@ def _extract_rate_limits(record):
 
 
 def read_codex_usage():
-    """Read the latest rate_limits from Codex session rollout files.
+    """Read the latest rate_limits for Codex.
 
-    The Codex CLI writes its rate-limit status into every rollout file
-    as part of world_state events. We read the most recently modified
-    rollout that has a non-null primary rate limit and extract the
-    used_percent / resets_at for the weekly window.
+    Priority 1: the opencodex quota cache while it is actively refreshed
+    (the local service gets live headers from its proxied codex traffic —
+    much fresher than rollout snapshots, which the CLI writes sparsely).
+    Priority 2: rate_limits records embedded in session rollout files.
     """
+    fresh_entry = _newest_opencodex_quota_entry(max_age_ms=10 * 60 * 1000)
+    if fresh_entry is not None:
+        weekly = fresh_entry.get("weeklyPercent")
+        if isinstance(weekly, (int, float)):
+            used = int(round(weekly))
+            return {
+                "provider": "Codex",
+                "seven_day": used,
+                "seven_day_reset": _format_reset_delta(
+                    fresh_entry.get("weeklyResetAt"), int(time.time())),
+                "plan": "Codex",
+                "level": "max" if used >= 80 else ("high" if used >= 50 else "low"),
+            }
+
     pattern = os.path.join(CODEX_SESSIONS_DIR, "**", "rollout-*.jsonl")
     try:
         candidates = sorted(
@@ -744,6 +761,37 @@ OPENCODE_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 OPENCODE_QUOTA_MAX_AGE = 7 * 86400 * 1000  # ms; matches the weekly window
 
 
+def _newest_opencodex_quota_entry(max_age_ms=None):
+    """Freshest quota entry from the opencodex cache, or None.
+
+    max_age_ms=None applies OPENCODE_QUOTA_MAX_AGE. Callers wanting only
+    actively-refreshed data (the codex poller) pass a tighter bound.
+    """
+    path = expand_path(
+        os.environ.get("VIBE_ISLAND_OPENCODEX_QUOTA_CACHE", OPENCODEX_QUOTA_CACHE)
+    )
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    quotas = data.get("quotas") if isinstance(data, dict) else None
+    if not isinstance(quotas, dict) or not quotas:
+        return None
+    newest = None
+    for entry in quotas.values():
+        if not isinstance(entry, dict):
+            continue
+        if newest is None or (entry.get("updatedAt") or 0) > (newest.get("updatedAt") or 0):
+            newest = entry
+    if newest is None:
+        return None
+    limit = OPENCODE_QUOTA_MAX_AGE if max_age_ms is None else max_age_ms
+    if int(time.time() * 1000) - (newest.get("updatedAt") or 0) > limit:
+        return None
+    return newest
+
+
 def opencode_go_api_key():
     """Read the opencode-go Zen key from the opencodex config (no logging)."""
     try:
@@ -816,28 +864,9 @@ def parse_iso_to_epoch(value):
 
 
 def read_opencode_quota_cache():
-    path = expand_path(
-        os.environ.get("VIBE_ISLAND_OPENCODEX_QUOTA_CACHE", OPENCODEX_QUOTA_CACHE)
-    )
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    quotas = data.get("quotas") if isinstance(data, dict) else None
-    if not isinstance(quotas, dict) or not quotas:
-        return None
-    newest = None
-    for entry in quotas.values():
-        if not isinstance(entry, dict):
-            continue
-        if newest is None or (entry.get("updatedAt") or 0) > (newest.get("updatedAt") or 0):
-            newest = entry
+    newest = _newest_opencodex_quota_entry()
     if newest is None:
         return None
-    now_ms = int(time.time() * 1000)
-    if now_ms - (newest.get("updatedAt") or 0) > OPENCODE_QUOTA_MAX_AGE:
-        return None  # service gone / plan idle past the window
     snapshot = {
         "provider": "OpenCode",
         "plan": "Go",

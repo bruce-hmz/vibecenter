@@ -101,16 +101,20 @@ polling itself. For manual debugging, the daemon still works standalone:
 ```bash
 python3 usage-daemon.py &
 ```
-Polled providers (pushed into the rotating usage strip):
+Polled providers (pushed into the rotating usage strip, every 30s by
+default — override with `VIBE_ISLAND_USAGE_POLL_INTERVAL`):
 - **Z.ai / 智谱 GLM** — API key from `~/.zcode/v2/config.json` (5h/7d/月 quotas)
-- **Codex** — local rollout files, no key needed
+- **Codex** — freshest source wins: the opencodex service's live-refreshed
+  quota cache (`~/.opencodex/codex-quota-cache.json`, <10 min old), then
+  rate_limits embedded in local rollout files (chatgpt.com's official
+  rate_limits API is Cloudflare-fingerprint-gated and rejects non-CLI clients)
 - **Google AI plan** — reads `~/.gemini/oauth_creds.json` (the `gemini`
   CLI's login), refreshes the token with gemini-cli's public OAuth client,
   and issues the same `loadCodeAssist` HEALTH_CHECK the CLI's `/about`
   uses: plan tier (Free / AI Pro / AI Ultra) + Google One AI credit
   balance for paid plans
-- **OpenCode Go** — reads the quota cache kept by the local opencodex
-  service (`~/.opencodex/codex-quota-cache.json`): weekly percent + reset
+- **OpenCode Go** — official Zen gateway usage endpoint (same data the
+  opencode.ai dashboard renders), key from the local opencodex config
 - any other OpenAI-compatible provider configured in ZCode
 
 Poll interval/config paths can be overridden with `VIBE_ISLAND_*` env
